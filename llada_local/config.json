@@ -44,6 +44,7 @@
   "residual_dropout": 0.0,
   "rms_norm_eps": 1e-05,
   "rope": true,
+  "rope_scaling_factor": 2.0,
   "rope_full_precision": true,
   "rope_theta": 500000.0,
   "scale_logits": false,

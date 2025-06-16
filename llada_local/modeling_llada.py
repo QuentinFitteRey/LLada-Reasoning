@@ -392,6 +392,8 @@ class RotaryEmbedding(nn.Module):
             dim = self.config.d_model // self.config.n_heads
             inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, dim, 2, device=device, dtype=torch.float) / dim))
             seq = torch.arange(seq_len, device=device, dtype=torch.float)
+            if self.config.rope_scaling_factor is not None and self.config.rope_scaling_factor > 1.0:
+                seq = seq / self.config.rope_scaling_factor
             freqs = einsum("i , j -> i j", seq, inv_freq)
             positions = torch.cat((freqs, freqs), dim=-1)
             pos_sin, pos_cos = positions.sin()[None, None, :, :], positions.cos()[None, None, :, :]
