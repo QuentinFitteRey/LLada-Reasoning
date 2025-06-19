@@ -65,8 +65,8 @@ args = parser.parse_args()
 
 # 2. Load or build config
 config = LLaDAConfig(
-    vocab_size=126352,
-    embedding_size=126352,
+    vocab_size=4096,
+    embedding_size=126464,
     d_model=4096,
     n_layers=32,
     n_heads=32,
@@ -74,6 +74,9 @@ config = LLaDAConfig(
     alibi=False,
     flash_attention=True,
     block_type='llama',
+    ffn_dim=12288,
+    kv_heads=32,
+    block_size=args.seq_len,
 )
 
 # 3. Dataset + Collator
@@ -161,6 +164,15 @@ def get_scheduler(opt):
 def main():
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print("----------------- CONFIG -----------------")
+    print(f" vocab_size        (should be d_model):   {config.vocab_size}")
+    print(f" embedding_size    (should be vocab size): {config.embedding_size}")
+    print(f" d_model (hidden)  (should match config.vocab_size): {config.d_model}")
+    print(f" ffn_dim (inner)   (defaults to ??):       {getattr(config, 'ffn_dim', None)}")
+    print(f" block_size        (defaults to ??):       {getattr(config, 'block_size', None)}")
+    print("--------------------------------------------")
+
 
     # Model + Tokenizer
     model = LLaDAModelLM(config, init_params=not args.pretrained_model)
