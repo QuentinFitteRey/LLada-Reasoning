@@ -9,7 +9,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from transformers import AutoTokenizer
 import argparse
-from modeling_llada import LLaDAModelLM, LLaDAConfig
+from llada_local.modeling_llada import LLaDAModelLM, LLaDAConfig
 
 # Helpers
 def random_remask(masked_indices, mask_ratio):
@@ -87,7 +87,8 @@ class IterableTextDataset(IterableDataset):
         buf = []
         with open(self.path, encoding="utf-8") as f:
             for line in f:
-                buf.extend(self.tokenizer.encode(line).ids)
+                ids = self.tokenizer(line, add_special_tokens=False).input_ids
+                buf.extend(ids)
                 while len(buf) >= self.seq_len:
                     yield torch.tensor(buf[:self.seq_len], dtype=torch.long)
                     buf = buf[self.seq_len:]
