@@ -22,17 +22,13 @@ def random_remask(masked_indices, mask_ratio):
     return new_flat.view(b, l)
 
 def low_confidence_remask(masked_indices, logits, mask_ratio):
-    # among the masked positions, compute confidence = max prob
     probs = F.softmax(logits, dim=-1)
     b, l, v = probs.shape
-    # get max prob at each position
     conf, _ = probs.max(dim=-1)               # [b, l]
     conf_masked = conf.masked_fill(~masked_indices, 1.0)
-    # we want to remask the fraction mask_ratio of lowest-confidence tokens
     k = int((masked_indices.sum() * mask_ratio).item())
     if k == 0:
         return masked_indices
-    # flatten and find the k smallest
     flat_conf = conf_masked.view(-1)
     idx = torch.topk(-flat_conf, k).indices     # indices of lowest conf
     new_flat = torch.zeros_like(flat_conf, dtype=torch.bool)
@@ -64,20 +60,20 @@ parser.add_argument("--epochs",           type=int, default=1)
 args = parser.parse_args()
 
 # 2. Load or build config
-config = LLaDAConfig(
-    vocab_size=4096,
-    embedding_size=126464,
-    d_model=4096,
-    n_layers=32,
-    n_heads=32,
-    rope=True,
-    alibi=False,
-    flash_attention=True,
-    block_type='llama',
-    ffn_dim=12288,
-    kv_heads=32,
-    block_size=args.seq_len,
-)
+# config = LLaDAConfig(
+#     vocab_size=4096,
+#     embedding_size=126464,
+#     d_model=4096,
+#     n_layers=32,
+#     n_heads=32,
+#     rope=True,
+#     alibi=False,
+#     flash_attention=True,
+#     block_type='llama',
+#     ffn_dim=12288,
+#     kv_heads=32,
+#     block_size=args.seq_len,
+# )
 
 # 3. Dataset + Collator
 class IterableTextDataset(IterableDataset):
@@ -125,20 +121,26 @@ def calc_loss(model, batch, mask_token_id, pad_token_id, eps=1e-3):
     t = torch.rand(b, device=device)
     mask_ratio = (1 - eps) * t + eps
     noisy_input, masked, p_mask = forward_process(input_ids, mask_token_id, mask_ratio)
+    #logits = model(input_ids=noisy_input).logits
+
+    #I don't know why this is needed
+    # if args.mask_strategy == "low_conf":
+    #     masked = low_confidence_remask(masked, logits, mask_ratio)
+    # else:
+    #     masked = random_remask(masked, mask_ratio)
+
+    # # now compute loss only on masked positions
+    # masked &= (input_ids != pad_token_id)
+
+    # if not masked.any(): 
+    #     return None
+
     logits = model(input_ids=noisy_input).logits
-
-    if args.mask_strategy == "low_conf":
-        masked = low_confidence_remask(masked, logits, mask_ratio)
-    else:
-        masked = random_remask(masked, mask_ratio)
-
-    # now compute loss only on masked positions
     masked &= (input_ids != pad_token_id)
 
-    if not masked.any(): 
-        return None
+    if not masked.any():
+        return None, 0.0
 
-    logits = model(input_ids=noisy).logits
     losses = F.cross_entropy(logits[masked], input_ids[masked], reduction="none")
     weighted = losses / p_mask[masked]
     return weighted.sum() / (b * l)
@@ -160,25 +162,31 @@ def get_scheduler(opt):
         return (0.25 - progress * (0.25 - args.min_lr/args.lr))
     return LambdaLR(opt, lr_lambda)
 
+def validation_step(model, val_loader, device, mask_id, pad_id, limit_batches=50):
+    model.eval()
+                val_batches = 0
+                val_loss = 0
+                with torch.no_grad():
+                    for i,batch in enumerate(val_loader):
+                        batch = {k: v.to(device) for k,v in batch.items()}
+                        _, log_loss = calc_loss(model, val_batch, mask_id, pad_id)
+                            val_loss_accum += log_loss
+                            val_batches += 1
+                            if val_batches >= 50: 
+                                break
+                    avg_val_loss = val_loss_accum / val_batches if val_batches > 0 else 0.0
+                    print(f"  Validation Loss: {avg_val_loss:.4f}")
 # 7. Main
 def main():
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    print("----------------- CONFIG -----------------")
-    print(f" vocab_size        (should be d_model):   {config.vocab_size}")
-    print(f" embedding_size    (should be vocab size): {config.embedding_size}")
-    print(f" d_model (hidden)  (should match config.vocab_size): {config.d_model}")
-    print(f" ffn_dim (inner)   (defaults to ??):       {getattr(config, 'ffn_dim', None)}")
-    print(f" block_size        (defaults to ??):       {getattr(config, 'block_size', None)}")
-    print("--------------------------------------------")
-
-
+    assert args.batch_size % args.local_batch == 0,
+    accumulation_steps = args.batch_size // args.local_batch
     # Model + Tokenizer
-    model = LLaDAModelLM(config, init_params=not args.pretrained_model)
     if args.pretrained_model:
-        model.load_state_dict(torch.load(args.pretrained_model), strict=False)
-    model.to(device)
+        model = LLaDAModelLM.from_pretrained(args.pretrained_model, trust_remote_code=True,torch_dtype=torch.bfloat16, device_map="auto")
+    else:
+        model = LLaDAModelLM(config, init_params=True)
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.pretrained_model or "GSAI-ML/LLaDA-8B-Instruct", trust_remote_code=True
@@ -197,23 +205,34 @@ def main():
     val_loader   = DataLoader(val_ds,   batch_size=args.local_batch, collate_fn=DataCollator())
 
     global_step = 0
+
+    print("Running initial validation on the extended-context model before training...")
+    initial_val_loss = run_validation(model, val_loader, device, mask_id, pad_id)
+    print(f"Initial Pre-training Validation Loss: {initial_val_loss:.4f}")
+
     model.train()
     for epoch in range(args.epochs):
-        for batch in train_loader:
+        for i,batch in enumerate(train_loader)  :
             global_step += 1
             batch = {k: v.to(device) for k,v in batch.items()}
             opt.zero_grad()
             loss = calc_loss(model, batch, mask_id, pad_id)
             if loss is not None:
+                loss = loss / accumulation_steps
                 loss.backward()
+
+            if (i+1) % accumulation_steps == 0:
                 opt.step()
                 sch.step()
+                opt.zero_grad()
+                global_step += 1
+                print(f"[Step {global_step}] loss = {loss.item() * accumulation_steps:.4f}, lr = {sch.get_last_lr()[0]:.2e}")
 
             if global_step % args.validation_interval == 0:
-                # (you can slot in your validation function here)
-                print(f"[Step {global_step}] loss = {loss:.4f}, lr = {sch.get_last_lr()[0]:.2e}")
+                validation_step()
+                model.train()
 
-            if global_step % 10000 == 0:
+            if global_step % 100 == 0 and global_step > 0:
                 ckpt = os.path.join(args.output_dir, f"step-{global_step}")
                 model.save_pretrained(ckpt)
                 tokenizer.save_pretrained(ckpt)
