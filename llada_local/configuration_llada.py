@@ -210,7 +210,10 @@ class ModelConfig():
     """
     If ``True``, use ``FlashAttention``.
     """
-
+    flash_attention_version: str = "flash_attention_2"
+    """
+    The version of FlashAttention to use. Options are "flash_attention_2" or "flash_attention_3".
+    """
     attention_dropout: float = 0.1
     """
     The dropout probability within the attention modules.

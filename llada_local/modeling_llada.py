@@ -573,12 +573,25 @@ class LLaDABlock(nn.Module):
 
         self.flash_attn_func = None
         if config.flash_attention:
-            try:
-                from flash_attn import flash_attn_func  # type: ignore
+            if config.flash_attention_version == "flash_attn_2":
+                try:
+                    from flash_attn import flash_attn_func  # type: ignore
 
-                self.flash_attn_func = flash_attn_func
-            except ModuleNotFoundError:
-                pass
+                    self.flash_attn_func = flash_attn_func
+                except ModuleNotFoundError:
+                    log.warning(
+                        "flash_attn_2 is enabled but the flash_attn package is not installed. "
+                        "Falling back to torch's scaled dot product attention."
+                    )
+            elif config.flash_attention_version == "flash_attn_3":
+                try:
+                    import flash_attn_interface
+                    self.flash_attn_func = flash_attn_interface.flash_attn_func()
+                except ModuleNotFoundError:
+                    log.warning(
+                        "flash_attn_3 is enabled but the flash_attn package is not installed. "
+                        "Falling back to torch's scaled dot product attention."
+                    )
 
     def reset_parameters(self):
         if self.k_norm is not None:
@@ -1391,7 +1404,10 @@ class LLaDAModelLM(PreTrainedModel):
             self.model = LLaDAModel(model_config, init_params=init_params)
         else:
             self.model = model
-
+    def set_activation_checkpointing(self, strategy: Optional[ActivationCheckpointingStrategy]):
+        """Passes the activation checkpointing command to the core model."""
+        self.model.set_activation_checkpointing(strategy)
+        
     def forward(
         self,
         input_ids: torch.LongTensor = None,

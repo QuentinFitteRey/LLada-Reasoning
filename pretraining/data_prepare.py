@@ -1,12 +1,12 @@
 #
-# Efficient script for creating long-context fine-tuning datasets.
+# FINAL, ROBUST SCRIPT for creating long-context fine-tuning datasets.
 #
-# This script streams data from Hugging Face, processes it on the fly,
-# and writes directly to train and validation files. It's memory-efficient
-# and suitable for very large datasets.
+# This script streams data from the Dolma dataset, shuffles it on the fly
+# using a buffer, and writes directly to train and validation files, ensuring
+# a truly random and well-mixed sample.
 #
 # You will need to install the required libraries first:
-# pip install datasets tiktoken tqdm
+# pip install datasets tiktoken tqdm zstandard
 #
 
 import os
@@ -15,100 +15,86 @@ from datasets import load_dataset
 import tiktoken
 from tqdm import tqdm
 
-DATA_CONFIG = {
-        "SlimPajama-ArXiv": {
-        "path": "cerebras/SlimPajama-627B",
-        "name": "default",
-        "split": "train",
-        "max_docs": 10000,
-        "text_col": "text"
-    },
-    "SlimPajama-Books": {
-        "path": "cerebras/SlimPajama-627B",
-        "name": "default",
-        "split": "train",
-        "max_docs": 5000, # Take 5,000 books
-        "text_col": "text"
-    },
-    "The-Stack-v2-Python": {
-        "path": "bigcode/the-stack-v2",
-        "name": "python", 
-        "split": "train",
-        "max_docs": 10000, 
-        "text_col": "content"
-    }
-}
+# --- Configuration Section ---
 
-MIN_TOKENS = 8192    
+# 1. Define the single, pre-mixed dataset to use.
+DATASET_PATH = "allenai/dolma"
+DATASET_CONFIG = "v1_7"
+TEXT_COLUMN = "text"
+
+# 2. Set the filtering, splitting, and total size parameters.
+TOTAL_DOCS_TO_WRITE = 1000
+MIN_TOKENS = 8192
 VAL_SPLIT_RATIO = 0.01
 OUTPUT_DIR = "data"
 
+# 3. Use a fast tokenizer for counting tokens.
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
+# --- End of Configuration ---
 
 
 def main():
-    """Main function to process datasets and create splits."""
-    
+    """Main function to process the dataset and create splits."""
+
     print("Starting dataset creation process...")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    print(f"Loading dataset stream from {DATASET_PATH} (config: {DATASET_CONFIG})...")
+
+    ds = load_dataset(
+        path=DATASET_PATH,
+        name=DATASET_CONFIG,
+        split="train",
+        streaming=True
+    )
+
+    #ds = ds.shuffle(buffer_size=10000, seed=42)
 
     train_filepath = os.path.join(OUTPUT_DIR, "train.txt")
     val_filepath = os.path.join(OUTPUT_DIR, "val.txt")
 
-    # Open the final output files once
+    print(f"\nWriting up to {TOTAL_DOCS_TO_WRITE} documents with >{MIN_TOKENS} tokens...")
+
     with open(train_filepath, "w", encoding="utf-8") as f_train, \
          open(val_filepath, "w", encoding="utf-8") as f_val:
 
-        total_docs_written = 0
         train_docs_written = 0
         val_docs_written = 0
 
-        # Process each dataset defined in the config
-        for name, config in DATA_CONFIG.items():
-            print(f"\n---> Processing dataset: {name}")
+        pbar = tqdm(total=TOTAL_DOCS_TO_WRITE, desc="Writing documents")
 
-            ds = load_dataset(
-                path=config["path"],
-                name=config.get("name"), # Use .get() for optional keys
-                split=config["split"],
-                streaming=True  # The magic flag for efficiency!
-            )
+        for doc in ds:
+            if (train_docs_written + val_docs_written) >= TOTAL_DOCS_TO_WRITE:
+                break
 
-            docs_processed = 0
-            # Use tqdm for a progress bar
-            for doc in tqdm(ds, desc=f"Streaming {name}"):
-                # Stop if we have processed enough documents from this source
-                if docs_processed >= config["max_docs"]:
-                    break
-                
-                text = doc.get(config["text_col"])
-                if not text or not isinstance(text, str):
-                    continue # Skip if the text column is missing or not a string
+            text = doc.get(TEXT_COLUMN)
+            if not text or not isinstance(text, str):
+                continue
 
-                # Filter by token count
-                # This is more accurate than character count for LLMs
+            try:
                 tokens = tokenizer.encode(text)
-                if len(tokens) < MIN_TOKENS:
-                    continue
+            except Exception:
+                continue
 
-                # Clean the text: strip whitespace and replace newlines to keep one doc per line
-                cleaned_text = text.strip().replace("\n", " ")
+            if len(tokens) < MIN_TOKENS:
+                continue
 
-                # Randomly assign to train or validation split
-                if random.random() > VAL_SPLIT_RATIO:
-                    f_train.write(cleaned_text + "\n")
-                    train_docs_written += 1
-                else:
-                    f_val.write(cleaned_text + "\n")
-                    val_docs_written += 1
-                
-                total_docs_written += 1
-                docs_processed += 1
+            cleaned_text = text.strip().replace("\n", " ")
+
+            if random.random() > VAL_SPLIT_RATIO:
+                f_train.write(cleaned_text + "\n")
+                train_docs_written += 1
+            else:
+                f_val.write(cleaned_text + "\n")
+                val_docs_written += 1
+
+            pbar.update(1)
+
+        pbar.close()
 
     print("\n--- Dataset creation complete! ---")
-    print(f"Total documents processed from sources: {sum(cfg['max_docs'] for cfg in DATA_CONFIG.values())}")
-    print(f"Total documents that met the minimum token count ({MIN_TOKENS}): {total_docs_written}")
+    print(f"Total documents written: {train_docs_written + val_docs_written}")
     print(f"  - Wrote {train_docs_written} documents to: {train_filepath}")
     print(f"  - Wrote {val_docs_written} documents to: {val_filepath}")
     print("------------------------------------")
