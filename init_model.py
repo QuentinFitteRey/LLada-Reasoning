@@ -1,4 +1,5 @@
-from transformers import AutoModel, AutoTokenizer
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 
 def init_model():
@@ -13,6 +14,8 @@ def init_model():
     model = AutoModelForCausalLM.from_pretrained(
         local_model_path,
         trust_remote_code=True, 
+        torch_dtype=torch.bfloat16,  # Automatically set the dtype based on the model
+       #device_map="auto",  # Automatically set the device map
         # Add other parameters as needed, e.g., for quantization
         # device_map="auto",
         # load_in_8bit=True 

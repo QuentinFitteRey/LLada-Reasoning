@@ -112,18 +112,30 @@ def main():
     device = 'cuda'
 
     model, tokenizer = init_model()
+    model = model.to(device)
 
-    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she runs 6 kilometers per hour. How many kilometers can she run in 8 hours?"
+    # Plain text prompt for base model
+    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she runs 6 kilometers per hour. To do 8 km she is running "
 
-    # Add special tokens for the Instruct model. The Base model does not require the following two lines.
-    m = [{"role": "user", "content": prompt}, ]
-    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+    # Tokenize the prompt directly
+    input_ids = tokenizer(prompt, return_tensors="pt")['input_ids'].to(device)
 
-    input_ids = tokenizer(prompt)['input_ids']
-    input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
+    # Generate output
+    out = generate(
+        model,
+        input_ids,
+        steps=128,
+        gen_length=128,
+        block_length=32,
+        temperature=0.0,
+        cfg_scale=0.0,
+        remasking='low_confidence'
+    )
 
-    out = generate(model, input_ids, steps=128, gen_length=128, block_length=32, temperature=0., cfg_scale=0., remasking='low_confidence')
-    print(tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)[0])
+    # Decode and print only the generated part
+    generated_text = tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)[0]
+    print(generated_text)
+
 
 
 if __name__ == '__main__':
