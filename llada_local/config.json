@@ -44,12 +44,20 @@
   "precision": "amp_bf16",
   "residual_dropout": 0.0,
   "rms_norm_eps": 1e-05,
-  "rope": true,
+  "rope": false,
   "rope_full_precision": false,
   "rope_theta": 500000.0,
   "scale_logits": false,
   "transformers_version": "4.46.3",
   "use_cache": false,
   "vocab_size": 126464,
-  "weight_tying": false
+  "weight_tying": false,
+  "yarn": true,
+  "yarn_scale": 1.0,
+  "yarn_original_max_position_embeddings": 4096,
+  "yarn_extrapolation_factor": 1.0,
+  "yarn_attn_factor": 1.0,
+  "yarn_beta_fast": 1.0,
+  "yarn_beta_slow": 32.0,
+  "yarn_finetuned": false
 }

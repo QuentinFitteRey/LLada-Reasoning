@@ -2,8 +2,8 @@ import os
 from huggingface_hub import snapshot_download
 
 # Define the model ID and your local directory name
-model_id = "GSAI-ML/LLaDA-8B-Instruct"
-local_model_path = "./llada_local_instruct"
+model_id = "GSAI-ML/LLaDA-8B-Base"
+local_model_path = "./llada_local"
 
 # Create the directory if it doesn't exist
 os.makedirs(local_model_path, exist_ok=True)

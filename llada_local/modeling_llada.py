@@ -55,6 +55,7 @@ __all__ = [
     "RMSLayerNorm",
     "GemmaRMSLayerNorm",
     "RotaryEmbedding",
+    "YarnRotaryEmbedding",
     "Activation",
     "GELU",
     "ReLU",
@@ -443,9 +444,8 @@ class YarnRotaryEmbedding(nn.Module):
         self.attn_factor = config.yarn_attn_factor
         self.beta_fast = config.yarn_beta_fast
         self.beta_slow = config.yarn_beta_slow
-        self.full_precision = config.rope_full_precision
-
-        self.yarn(_non_meta_init_device(config))    
+        # Warm up cache.
+        self.yarn(_non_meta_init_device(config))
         self.get_rotary_embedding(config.max_sequence_length, _non_meta_init_device(config))
 
     def get_rotary_embedding(self, seq_len: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -464,12 +464,11 @@ class YarnRotaryEmbedding(nn.Module):
             return pos_sin[:, :, :seq_len, :], pos_cos[:, :, :seq_len, :]
 
         with torch.autocast(device.type, enabled=False):
-            t = torch.arange(seq_len, device=device, dtype=torch.float32)
-            freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            pos_sin = (emb.sin() * self.mscale)[None, None, :, :]
-            pos_cos = (emb.cos() * self.mscale)[None, None, :, :]
-
+            seq = torch.arange(seq_len, device=device, dtype=torch.float)
+            freqs = einsum("i , j -> i j", seq, self.inv_freq)
+            positions = torch.cat((freqs, freqs), dim=-1)
+            pos_sin = (positions.sin() * self.mscale)[None, None, :, :]
+            pos_cos = (positions.cos() * self.mscale)[None, None, :, :]
         self.__cache["rope_pos_sin"] = pos_sin
         self.__cache["rope_pos_cos"] = pos_cos
         return pos_sin, pos_cos
@@ -481,27 +480,27 @@ class YarnRotaryEmbedding(nn.Module):
         return torch.cat((-x2, x1), dim=-1)
 
     def apply_rotary_pos_emb(self, pos_sin: torch.Tensor, pos_cos: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        return (t * pos_cos + self.rotate_half(t) * pos_sin).to(t.dtype)
+        return ((t * pos_cos) + (self.rotate_half(t) * pos_sin)).to(t.dtype)
 
     def forward(self, q: torch.Tensor, k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self.full_precision:
+        if self.config.rope_full_precision:
             q_, k_ = q.float(), k.float()
         else:
             q_, k_ = q, k
 
         with torch.autocast(q.device.type, enabled=False):
-            query_len, key_len = q_.shape[-2], k_.shape[-2]
+            query_len, key_len = q_.shape[-2], k_.shape[-2]  # could be different if layer_past not None
             pos_sin, pos_cos = self.get_rotary_embedding(key_len, q_.device)
             pos_sin = pos_sin.type_as(q_)
             pos_cos = pos_cos.type_as(q_)
             q_ = self.apply_rotary_pos_emb(
-                pos_sin[:, :, key_len - query_len: key_len, :],
-                pos_cos[:, :, key_len - query_len: key_len, :],
+                pos_sin[:, :, key_len - query_len : key_len, :],
+                pos_cos[:, :, key_len - query_len : key_len, :],
                 q_,
             )
             k_ = self.apply_rotary_pos_emb(pos_sin, pos_cos, k_)
         return q_.type_as(q), k_.type_as(k)
-
+    
     def yarn(self, device):
         pos_freqs = self.base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
@@ -513,6 +512,9 @@ class YarnRotaryEmbedding(nn.Module):
 
         self.inv_freq = inv_freq
         self.mscale = float(self.get_mscale(self.scale) * self.attn_factor) # Get n-d magnitude scaling corrected for interpolation
+
+        # self.inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, device=device, dtype=torch.float) / self.dim))
+        # self.mscale = 1.0  # Default to 1.0 if no scaling is applied
 
     # Inverse dim formula to find dim based on number of rotations
     def find_correction_dim(self, num_rotations, dim, base=10000.0, max_position_embeddings=4000):
@@ -819,7 +821,7 @@ class LLaDABlock(nn.Module):
         present = (k, v) if use_cache else None
         query_len, key_len = q.shape[-2], k.shape[-2]  # could be different if layer_past not None
 
-        if self.config.rope:
+        if self.config.rope or self.config.yarn:
             # Apply rotary embeddings.
             q, k = self.rotary_emb(q, k)
 
@@ -1158,8 +1160,8 @@ class LLaDAModel(nn.Module):
         if self.config.alibi and self.config.flash_attention:
             raise Exception("ALiBi is currently not supported with FlashAttention")
 
-        if self.config.alibi and self.config.rope:
-            raise Exception("ALiBi and RoPE are mutually exclusive")
+        if self.config.alibi and self.config.rope and self.config.yarn:
+            raise Exception("ALiBi, RoPE and Yarn are mutually exclusive")
 
         if self.config.embedding_size is not None and self.config.embedding_size != self.config.vocab_size:
             if self.config.embedding_size < self.config.vocab_size:
@@ -1203,7 +1205,7 @@ class LLaDAModel(nn.Module):
         else:
             self.transformer.update({"blocks": nn.ModuleList(blocks)})
 
-        if not (self.config.alibi or self.config.rope):
+        if not (self.config.alibi or self.config.rope or self.config.yarn):
             self.transformer.update(
                 {"wpe": nn.Embedding(config.max_sequence_length, config.d_model, device=config.init_device)}
             )
@@ -1328,7 +1330,7 @@ class LLaDAModel(nn.Module):
         """
         # Add Basic MDM Model config check
         assert not self.config.alibi, "Alibi length extrapolation is not supported for MDM."
-        assert self.config.rope, "Rope must be used in Llama-Encoder for MDM."
+        assert (self.config.rope or self.config.yarn), "Either RoPE or Yarn must be enabled."
         assert (past_key_values is None and not use_cache), "The kvcache is not suppotred for MDM."
 
         output_hidden_states = output_hidden_states if output_hidden_states is not None else False
@@ -1349,7 +1351,7 @@ class LLaDAModel(nn.Module):
         if self.config.input_emb_norm:
             x = x * (self.config.d_model**0.5)
 
-        if not (self.config.alibi or self.config.rope):
+        if not (self.config.alibi or self.config.rope or self.config.yarn):
             # Get positional embeddings.
             # shape: (1, seq_len)
             pos = torch.arange(past_length, past_length + seq_len, dtype=torch.long, device=x.device).unsqueeze(0)
