@@ -23,10 +23,10 @@ DATASET_CONFIG = "v1_7"
 TEXT_COLUMN = "text"
 
 # 2. Set the filtering, splitting, and total size parameters.
-TOTAL_DOCS_TO_WRITE = 1000
+TOTAL_DOCS_TO_WRITE = 110000
 MIN_TOKENS = 8192
-VAL_SPLIT_RATIO = 0.01
-OUTPUT_DIR = "data"
+VAL_SPLIT_RATIO = 0.1
+OUTPUT_DIR = "data_pretrain"
 
 # 3. Use a fast tokenizer for counting tokens.
 tokenizer = tiktoken.get_encoding("cl100k_base")
