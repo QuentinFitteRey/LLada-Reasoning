@@ -20,13 +20,13 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.nn.utils.rnn import pad_sequence
 
 parser = argparse.ArgumentParser(description="Fine-tune LLaDA for extended context")
-parser.add_argument("--train-data",       type=str, required=False, help="Path to the training data file", default="./data/train.txt")
-parser.add_argument("--val-data",         type=str, required=False, help="Path to the validation data file", default="./data/val.txt")
+parser.add_argument("--train-data",       type=str, required=False, help="Path to the training data file", default="./data_pretrain/train.txt")
+parser.add_argument("--val-data",         type=str, required=False, help="Path to the validation data file", default="./data_pretrain/val.txt")
 parser.add_argument("--output-dir",       type=str, default="./checkpoints/checkpoints_llada_pretrain_8k_first", help="Directory to save checkpoints and final model.")
 parser.add_argument("--pretrained-model", type=str, required=False, help="Path to the base model to fine-tune", default="./llada_local")
 parser.add_argument("--resume-from-checkpoint", type=str, default=None, help="Path to a checkpoint directory to resume training from.")
 parser.add_argument("--batch-size",       type=int, default=64, help="Global batch size (for gradient accumulation)")
-parser.add_argument("--local-batch",      type=int, default=4, help="Local batch size (per-device)")
+parser.add_argument("--local-batch",      type=int, default=8, help="Local batch size (per-device)")
 parser.add_argument("--seq-len",          type=int, default=8192, help="Maximum sequence length for training (will truncate longer sequences)")
 parser.add_argument("--lr",               type=float, default=2e-5, help="Peak learning rate for fine-tuning")
 parser.add_argument("--weight-decay",     type=float, default=0.0, help="Weight decay for the optimizer.")
@@ -39,8 +39,8 @@ parser.add_argument("--lora-dropout",     type=float, default=0.05, help="Dropou
 parser.add_argument("--lora-target-modules", type=str, nargs='+', default=['q_proj', 'v_proj', 'o_proj', 'k_proj'], help="Modules to apply LoRA to.")
 parser.add_argument("--warmup-steps",      type=int, default=20, help="Number of warmup steps for the learning rate scheduler.")
 parser.add_argument("--min-lr-ratio",      type=float, default=0.1, help="The learning rate will decay to this ratio of the peak LR (lr * min_lr_ratio).")
-parser.add_argument("--validation-interval", type=int, default=16)
-parser.add_argument("--checkpoint-interval", type=int, default=16)
+parser.add_argument("--validation-interval", type=int, default=32)
+parser.add_argument("--checkpoint-interval", type=int, default=32)
 parser.add_argument("--epochs",            type=int, default=1)
 parser.add_argument("--activation-checkpointing", action='store_true', default=True, help="Enable activation checkpointing for memory efficiency.")
 parser.add_argument("--use-wandb", action='store_true', default=True, help="Enable Weights & Biases logging.")
@@ -100,7 +100,7 @@ def print_trainable_parameters(model):
         if param.requires_grad: trainable_params += param.numel()
     print(f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param:.2f}")
 
-def run_validation(model, val_loader, device, mask_id, pad_id, limit_batches=5):
+def run_validation(model, val_loader, device, mask_id, pad_id, limit_batches=50):
     model.eval()
     val_loss_accum, val_batches = 0.0, 0
     with torch.no_grad():

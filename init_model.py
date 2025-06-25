@@ -1,8 +1,9 @@
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
+from peft import PeftModel, PeftConfig, LoraConfig, get_peft_model_state_dict, set_peft_model_state_dict
 
-def init_model():
+def init_model(lora=False):
     # Path to your local directory containing the modified model
     local_model_path = "./llada_local" 
 
@@ -21,6 +22,19 @@ def init_model():
         # load_in_8bit=True 
     )
     print("Model loaded successfully with local modifications.")
+
+    if lora:
+        print("Loading LoRA configuration...")
+        lora_config = LoraConfig(
+            r=32,
+            lora_alpha=64,
+            lora_dropout=0.5,
+            bias="none",
+            task_type="CAUSAL_LM",
+            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"]  
+        )
+        model = PeftModel.from_pretrained(model, "./checkpoints/checkpoints_llada_pretrain_8k_first/step-416", lora_config=lora_config)
+        print("LoRA model loaded successfully.")
     return model, tokenizer
 
 if __name__ == "__main__":

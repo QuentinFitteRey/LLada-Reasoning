@@ -487,6 +487,8 @@ class YarnRotaryEmbedding(nn.Module):
             q_, k_ = q.float(), k.float()
         else:
             q_, k_ = q, k
+        if self.inv_freq.device != q_.device:
+            self.inv_freq = self.inv_freq.to(q_.device)
 
         with torch.autocast(q.device.type, enabled=False):
             query_len, key_len = q_.shape[-2], k_.shape[-2]  # could be different if layer_past not None
@@ -1331,7 +1333,7 @@ class LLaDAModel(nn.Module):
         # Add Basic MDM Model config check
         assert not self.config.alibi, "Alibi length extrapolation is not supported for MDM."
         assert (self.config.rope or self.config.yarn), "Either RoPE or Yarn must be enabled."
-        assert (past_key_values is None and not use_cache), "The kvcache is not suppotred for MDM."
+        #assert (past_key_values is None and not use_cache), "The kvcache is not suppotred for MDM."
 
         output_hidden_states = output_hidden_states if output_hidden_states is not None else False
 
