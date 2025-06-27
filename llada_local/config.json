@@ -32,7 +32,7 @@
   "layer_norm_type": "rms",
   "layer_norm_with_affine": true,
   "mask_token_id": 126336,
-  "max_sequence_length": 4096,
+  "max_sequence_length": 8192,
   "mlp_hidden_size": 12288,
   "mlp_ratio": 4,
   "model_type": "llada",

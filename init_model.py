@@ -20,6 +20,7 @@ def init_model(lora=False):
         # Add other parameters as needed, e.g., for quantization
         # device_map="auto",
         # load_in_8bit=True 
+        local_files_only=True,  # Ensure it loads from local files only
     )
     print("Model loaded successfully with local modifications.")
 
@@ -33,7 +34,7 @@ def init_model(lora=False):
             task_type="CAUSAL_LM",
             target_modules=["q_proj", "v_proj", "k_proj", "o_proj"]  
         )
-        model = PeftModel.from_pretrained(model, "./checkpoints/checkpoints_llada_pretrain_8k_first/step-416", lora_config=lora_config)
+        model = PeftModel.from_pretrained(model, "/storage/home/hcoda1/0/jmoutahir3/scratch/LLaDA_checkpoints/test_checkpoint", lora_config=lora_config)
         print("LoRA model loaded successfully.")
     return model, tokenizer
 
