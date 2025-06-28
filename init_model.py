@@ -2,6 +2,9 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 from peft import PeftModel, PeftConfig, LoraConfig, get_peft_model_state_dict, set_peft_model_state_dict
+import os
+
+adapter_path = os.path.expanduser("~/scratch/LLaDA_checkpoints/test_checkpoint")
 
 def init_model(lora=False):
     # Path to your local directory containing the modified model
@@ -34,7 +37,7 @@ def init_model(lora=False):
             task_type="CAUSAL_LM",
             target_modules=["q_proj", "v_proj", "k_proj", "o_proj"]  
         )
-        model = PeftModel.from_pretrained(model, "/storage/home/hcoda1/0/jmoutahir3/scratch/LLaDA_checkpoints/test_checkpoint", lora_config=lora_config)
+        model = PeftModel.from_pretrained(model, adapter_path, lora_config=lora_config)
         print("LoRA model loaded successfully.")
     return model, tokenizer
 
