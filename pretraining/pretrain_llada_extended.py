@@ -1,3 +1,4 @@
+# (Imports and parser remain the same)
 import os
 import torch
 import torch.nn.functional as F
@@ -7,6 +8,8 @@ from torch.optim.lr_scheduler import LambdaLR
 from transformers import AutoTokenizer
 import argparse
 import time
+import random 
+import math
 
 import wandb
 
@@ -19,56 +22,78 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.utils.rnn import pad_sequence
 
+# --- (Parser definition remains the same as your last version) ---
 parser = argparse.ArgumentParser(description="Fine-tune LLaDA for extended context")
-parser.add_argument("--train-data",       type=str, required=False, help="Path to the training data file", default="./data/train.txt")
-parser.add_argument("--val-data",         type=str, required=False, help="Path to the validation data file", default="./data/val.txt")
-parser.add_argument("--output-dir",       type=str, default="./checkpoints/checkpoints_llada_pretrain_8k_first", help="Directory to save checkpoints and final model.")
-parser.add_argument("--pretrained-model", type=str, required=False, help="Path to the base model to fine-tune", default="./llada_local")
+parser.add_argument("--train-data",          type=str, required=False, help="Path to the training data file", default="./data_pretrain/train.txt")
+parser.add_argument("--val-data",            type=str, required=False, help="Path to the validation data file", default="./data_pretrain/val.txt")
+parser.add_argument("--output-dir",          type=str, default="./checkpoints/checkpoints_llada_pretrain_8k_clip_lr15_betterval_128", help="Directory to save checkpoints and final model.")
+parser.add_argument("--pretrained-model",    type=str, required=False, help="Path to the base model to fine-tune", default="./llada_local")
 parser.add_argument("--resume-from-checkpoint", type=str, default=None, help="Path to a checkpoint directory to resume training from.")
-parser.add_argument("--batch-size",       type=int, default=64, help="Global batch size (for gradient accumulation)")
-parser.add_argument("--local-batch",      type=int, default=4, help="Local batch size (per-device)")
-parser.add_argument("--seq-len",          type=int, default=8192, help="Maximum sequence length for training (will truncate longer sequences)")
-parser.add_argument("--lr",               type=float, default=2e-5, help="Peak learning rate for fine-tuning")
-parser.add_argument("--weight-decay",     type=float, default=0.0, help="Weight decay for the optimizer.")
-parser.add_argument("--max-train-steps",  type=int, default=500, help="Total number of training steps for the fine-tuning run.")
+parser.add_argument("--batch-size",          type=int, default=64, help="Global batch size (for gradient accumulation)")
+parser.add_argument("--local-batch",         type=int, default=8, help="Local batch size (per-device)")
+parser.add_argument("--seq-len",             type=int, default=8192, help="Maximum sequence length for training (will truncate longer sequences)")
+parser.add_argument("--lr",                  type=float, default=1e-5, help="Peak learning rate for fine-tuning")
+parser.add_argument("--weight-decay",        type=float, default=0.0, help="Weight decay for the optimizer.")
+parser.add_argument("--max-train-steps",     type=int, default=500, help="Total number of training steps for the fine-tuning run.")
 # --- LoRA Parameters ---
-parser.add_argument("--use-lora",         action='store_true', default=True, help="Enable LoRA for parameter-efficient fine-tuning.")
-parser.add_argument("--lora-r",           type=int, default=32, help="The rank of the LoRA matrices.")
-parser.add_argument("--lora-alpha",       type=int, default=64, help="The scaling factor for LoRA matrices (often 2*r).")
-parser.add_argument("--lora-dropout",     type=float, default=0.05, help="Dropout probability for LoRA layers.")
+parser.add_argument("--use-lora",            action='store_true', default=True, help="Enable LoRA for parameter-efficient fine-tuning.")
+parser.add_argument("--lora-r",              type=int, default=128, help="The rank of the LoRA matrices.")
+parser.add_argument("--lora-alpha",          type=int, default=256, help="The scaling factor for LoRA matrices (often 2*r).")
+parser.add_argument("--lora-dropout",        type=float, default=0.05, help="Dropout probability for LoRA layers.")
 parser.add_argument("--lora-target-modules", type=str, nargs='+', default=['q_proj', 'v_proj', 'o_proj', 'k_proj'], help="Modules to apply LoRA to.")
-parser.add_argument("--warmup-steps",      type=int, default=20, help="Number of warmup steps for the learning rate scheduler.")
-parser.add_argument("--min-lr-ratio",      type=float, default=0.1, help="The learning rate will decay to this ratio of the peak LR (lr * min_lr_ratio).")
-parser.add_argument("--validation-interval", type=int, default=16)
-parser.add_argument("--checkpoint-interval", type=int, default=16)
-parser.add_argument("--epochs",            type=int, default=1)
+# --- Training Stability Parameters ---
+parser.add_argument("--warmup-steps",        type=int, default=20, help="Number of warmup steps for the learning rate scheduler.")
+parser.add_argument("--min-lr-ratio",        type=float, default=0.1, help="The learning rate will decay to this ratio of the peak LR (lr * min_lr_ratio).")
+parser.add_argument("--grad-clip-norm",      type=float, default=1.0, help="Maximum norm for gradient clipping.")
+parser.add_argument("--val-mc-runs",         type=int, default=1, help="Number of Monte Carlo runs for a stable validation loss.")
+# --- Logging and Checkpointing ---
+parser.add_argument("--validation-interval", type=int, default=32)
+parser.add_argument("--checkpoint-interval", type=int, default=32)
+parser.add_argument("--val-limit-batches",   type=int, default=75, help="Number of batches to run validation on.")
+parser.add_argument("--epochs",              type=int, default=1)
 parser.add_argument("--activation-checkpointing", action='store_true', default=True, help="Enable activation checkpointing for memory efficiency.")
-parser.add_argument("--use-wandb", action='store_true', default=True, help="Enable Weights & Biases logging.")
-parser.add_argument("--wandb-project", type=str, default="llada-pretrain", help="W&B project name.")
-parser.add_argument("--wandb-entity", type=str, default=None, help="W&B entity (username or team).")
-parser.add_argument("--wandb-run-name", type=str, default=None, help="A name for this specific W&B run.")
+parser.add_argument("--use-wandb",           action='store_true', default=True, help="Enable Weights & Biases logging.")
+parser.add_argument("--wandb-project",       type=str, default="llada-pretrain", help="W&B project name.")
+parser.add_argument("--wandb-entity",        type=str, default=None, help="W&B entity (username or team).")
+parser.add_argument("--wandb-run-name",      type=str, default=None, help="A name for this specific W&B run.")
 args = parser.parse_args()
 
 
+# MODIFIED: Your previous version of the Dataset is fine.
 class LineByLineTextDataset(Dataset):
     def __init__(self, path, tokenizer, max_len):
         self.tokenizer = tokenizer
         self.max_len = max_len
         with open(path, encoding="utf-8") as f:
             self.examples = [line.strip() for line in f if line.strip()]
-    def __len__(self): return len(self.examples)
+
+    def __len__(self):
+        return len(self.examples)
+
     def __getitem__(self, i):
         line = self.examples[i]
-        tokenized = self.tokenizer(line, add_special_tokens=True, max_length=self.max_len, padding=False, truncation=True)
+        # Keep random length sampling commented out as per your last version
+        target_seq_len = self.max_len
+        tokenized = self.tokenizer(
+            line,
+            add_special_tokens=True,
+            max_length=target_seq_len,
+            padding=False,
+            truncation=True
+        )
         return torch.tensor(tokenized.input_ids, dtype=torch.long)
 
+# The fixed DataCollator is not needed if not using random lengths, but we keep it for correctness
 class DataCollatorWithPadding:
     def __init__(self, pad_token_id):
         self.pad_token_id = pad_token_id
     def __call__(self, examples):
+        # NOTE: Since random length is off, this will just pad to max_len, which is fine.
+        # If you re-enable random lengths, this distributed-aware collator is required.
         padded_batch = pad_sequence(examples, batch_first=True, padding_value=self.pad_token_id)
         return {"input_ids": padded_batch}
 
+# --- (calc_loss, forward_process, print_trainable_parameters are unchanged) ---
 def calc_loss(model, batch, mask_token_id, pad_token_id, eps=1e-3):
     input_ids = batch["input_ids"]
     b, l = input_ids.shape
@@ -100,19 +125,46 @@ def print_trainable_parameters(model):
         if param.requires_grad: trainable_params += param.numel()
     print(f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param:.2f}")
 
-def run_validation(model, val_loader, device, mask_id, pad_id, limit_batches=5):
+
+# NEW: Revamped validation function for correct distributed evaluation
+@torch.no_grad()
+def run_validation(model, val_loader, device, mask_id, pad_id, limit_batches, mc_runs):
     model.eval()
-    val_loss_accum, val_batches = 0.0, 0
-    with torch.no_grad():
-        for batch in val_loader:
-            batch = {k: v.to(device) for k, v in batch.items()}
+    total_avg_loss = 0.0
+    total_batches = 0
+    
+    # Each rank processes its own shard of the validation data
+    for i, batch in enumerate(val_loader):
+        print(f"[Rank {dist.get_rank()}] Processing validation batch {i + 1}/{len(val_loader)}")
+        if i >= limit_batches:
+            break
+
+        batch = {k: v.to(device) for k, v in batch.items()}
+        mc_losses = []
+        
+        for _ in range(mc_runs):
             _, log_loss = calc_loss(model, batch, mask_id, pad_id)
-            val_loss_accum += log_loss
-            val_batches += 1
-            if val_batches >= limit_batches: break
-    avg_val_loss = val_loss_accum / val_batches if val_batches > 0 else 0.0
+            if log_loss is not None and not math.isinf(log_loss):
+                mc_losses.append(log_loss)
+        
+        if mc_losses:
+            batch_avg_loss = sum(mc_losses) / len(mc_losses)
+            total_avg_loss += batch_avg_loss
+            total_batches += 1
+
+    # Place the calculated average loss for this rank into a tensor
+    local_avg_loss = torch.tensor(total_avg_loss / total_batches if total_batches > 0 else 0.0, device=device)
+    
+    # Sum the losses from all ranks and count how many ranks participated
+    dist.all_reduce(local_avg_loss, op=dist.ReduceOp.SUM)
+    world_size = dist.get_world_size()
+
+    # Divide by the number of ranks to get the true average loss across all data
+    global_avg_val_loss = local_avg_loss / world_size
+    
     model.train()
-    return avg_val_loss
+    return global_avg_val_loss.item()
+
 
 def setup_ddp():
     dist.init_process_group(backend="nccl")
@@ -127,7 +179,8 @@ def main():
     world_size = dist.get_world_size()
     device = torch.device(f"cuda:{os.environ['LOCAL_RANK']}")
     is_main_process = rank == 0
-
+    
+    # --- (WandB setup is unchanged) ---
     wandb_run_id = None
     if is_main_process and args.use_wandb:
         if args.resume_from_checkpoint:
@@ -145,12 +198,13 @@ def main():
             id=wandb_run_id, 
             name=run_name,
             config=args,
-            resume="allow"   
+            resume="allow"  
         )
 
     if is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)
 
+    # --- (Model and Tokenizer setup is unchanged) ---
     accumulation_steps = args.batch_size // (args.local_batch * world_size)
     
     if not args.pretrained_model:
@@ -199,6 +253,7 @@ def main():
 
     model = DDP(model, device_ids=[int(os.environ["LOCAL_RANK"])])
 
+    # --- (Optimizer, Scheduler, and Checkpoint Resuming are unchanged) ---
     opt = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     def lr_lambda(current_step: int):
@@ -230,7 +285,7 @@ def main():
         else:
             if is_main_process:
                 print(f"Warning: --resume-from-checkpoint provided but trainer_state.pt not found in {args.resume_from_checkpoint}. Starting from scratch.")
-
+    
     train_ds = LineByLineTextDataset(args.train_data, tokenizer, args.seq_len)
     val_ds = LineByLineTextDataset(args.val_data, tokenizer, args.seq_len)
     collator = DataCollatorWithPadding(pad_token_id=pad_id)
@@ -239,14 +294,22 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=args.local_batch, collate_fn=collator, sampler=train_sampler)
     val_loader = DataLoader(val_ds, batch_size=args.local_batch, collate_fn=collator, sampler=val_sampler)
 
+    # --- CORRECTED INITIAL VALIDATION ---
     dist.barrier()
-    if global_step == 0 and is_main_process:
-        print("Running initial validation...")
-        initial_val_loss = run_validation(model.module, val_loader, device, mask_id, pad_id)
-        print(f"Initial Pre-training Validation Loss: {initial_val_loss:.4f}")
-        if args.use_wandb:
-            wandb.log({"validation/loss": initial_val_loss, "step": 0})
+    if global_step == 0:
+        # Now, all processes run validation in parallel
+        initial_val_loss = run_validation(model, val_loader, device, mask_id, pad_id, args.val_limit_batches, args.val_mc_runs)
+        
+        # But only the main process prints and logs
+        if is_main_process:
+            print("Running initial validation...")
+            print(f"Initial Pre-training Validation Loss: {initial_val_loss:.4f}")
+            if args.use_wandb:
+                wandb.log({"validation/loss": initial_val_loss, "step": 0})
     
+    # Add a barrier here to prevent the deadlock
+    dist.barrier()
+
     if is_main_process: print("Starting fine-tuning...")
     
     model.train()
@@ -267,6 +330,9 @@ def main():
                 (loss / accumulation_steps).backward()
 
             if (i + 1) % accumulation_steps == 0:
+                if args.grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
+
                 opt.step()
                 sch.step()
                 opt.zero_grad()
@@ -283,39 +349,44 @@ def main():
                             "epoch": epoch + 1
                         })
 
-                    if global_step % args.validation_interval == 0:
-                        val_loss = run_validation(model.module, val_loader, device, mask_id, pad_id)
+                if global_step > 0 and global_step % args.validation_interval == 0:
+                    # All processes run validation in parallel
+                    val_loss = run_validation(model, val_loader, device, mask_id, pad_id, args.val_limit_batches, args.val_mc_runs)
+                    
+                    # Only the main process prints and logs the final averaged result
+                    if is_main_process:
                         print(f"  Validation Loss @ Step {global_step}: {val_loss:.4f}")
                         if args.use_wandb:
                             wandb.log({
                                 "validation/loss": val_loss,
                                 "step": global_step
                             })
+                    dist.barrier()
 
-                    if global_step > 0 and global_step % args.checkpoint_interval == 0:
+
+                if global_step > 0 and global_step % args.checkpoint_interval == 0:
+                    if is_main_process:
                         ckpt_dir = os.path.join(args.output_dir, f"step-{global_step}")
                         print(f"  Saving checkpoint to {ckpt_dir}")
-                        
                         model.module.save_pretrained(ckpt_dir)
                         tokenizer.save_pretrained(ckpt_dir)
 
                         trainer_state = {
-                            "optimizer": opt.state_dict(),
-                            "scheduler": sch.state_dict(),
-                            "global_step": global_step,
-                            "epoch": epoch,
-                            "rng_state_cpu": torch.get_rng_state(),
-                            "rng_state_gpu": torch.cuda.get_rng_state(),
+                            "optimizer": opt.state_dict(), "scheduler": sch.state_dict(),
+                            "global_step": global_step, "epoch": epoch,
+                            "rng_state_cpu": torch.get_rng_state(), "rng_state_gpu": torch.cuda.get_rng_state(),
                         }
                         if args.use_wandb:
                             trainer_state["wandb_run_id"] = wandb.run.id
                         
                         torch.save(trainer_state, os.path.join(ckpt_dir, "trainer_state.pt"))
+                    dist.barrier()
 
             if global_step >= args.max_train_steps:
                 training_is_done = True
                 break
 
+    # --- (Final checkpoint saving logic is unchanged) ---
     dist.barrier()
     if is_main_process:
         print("Fine-tuning complete.")

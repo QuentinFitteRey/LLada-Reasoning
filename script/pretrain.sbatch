@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J pretrain_llada_reasoning
-#SBATCH -o /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints_llada_pretrain_8k_first/logs/SlurmTraining.out
-#SBATCH -e /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints_llada_pretrain_8k_first/logs/SlurmTraining.err
+#SBATCH -o /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_pretrain_8k_clip_lr15_betterval_128/logs/SlurmTraining.out
+#SBATCH -e /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_pretrain_8k_clip_lr15_betterval_128/logs/SlurmTraining.err
 #SBATCH -N1 --ntasks-per-node=1
 #SBATCH --gres=gpu:H200:4         # GPU type (H100) and number of GPUs
 #SBATCH -t4:00:00                        # Duration of the job
