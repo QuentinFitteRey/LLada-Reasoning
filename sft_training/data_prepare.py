@@ -11,6 +11,8 @@ DATASETS = [
     "Open-Orca/SlimOrca",
 ]
 
+DEBUG = False  # Set to True for quick testing with a small subset
+
 def to_conversation(example, ds_id: str):
     if ds_id.startswith("nvidia/Llama-Nemotron"):
         user = " ".join(msg.get("content","") for msg in example.get("input", []))
@@ -48,6 +50,7 @@ def prepare_user_assistant(output_path: str, model_name: str, max_length: int):
     all_splits = {}
 
     for ds_id in DATASETS:
+        print(f"\n🔍 Processing dataset: {ds_id}")
         ds_name = ds_id.split("/")[-1]
         builder = load_dataset(ds_id)
         splits  = list(builder.keys()) if isinstance(builder, dict) else ["train"]
@@ -59,9 +62,13 @@ def prepare_user_assistant(output_path: str, model_name: str, max_length: int):
 
             raw = load_dataset(ds_id, split=split)
 
+            # ——— TEST MODE: limit to first 500 examples for faster dev ———
+            if DEBUG:
+                raw = raw.select(range(500))
+                print(f"(test) processing only {len(raw)} examples", end=" … ")
+
             # ——— Stage 1: quick char-count filter ———
             def short_enough(ex):
-                # build the raw user+assistant strings
                 conv = to_conversation(ex, ds_id)
                 total_len = len(conv["user"]) + len(conv["assistant"])
                 return total_len <= char_limit
@@ -72,34 +79,31 @@ def prepare_user_assistant(output_path: str, model_name: str, max_length: int):
             )
             print(f"after char-filter: {len(stage1)}/{len(raw)}", end=" … ")
 
-            # ——— Stage 2: accurate token-count filter ———
-            def token_ok(examples):
-                # reuse to_conversation to get user+assistant
-                users, assists = [], []
-                for ex in examples:
-                    c = to_conversation(ex, ds_id)
-                    users.append(c["user"])
-                    assists.append(c["assistant"])
-                texts = [u + tokenizer.eos_token + a for u,a in zip(users, assists)]
-                toks = tokenizer(texts, add_special_tokens=False)
-                lengths = [len(ids) for ids in toks["input_ids"]]
-                return [l <= max_length for l in lengths]
+            # ——— Stage 2: normalize to {user,assistant} ———
+            conv = stage1.map(
+                lambda ex: to_conversation(ex, ds_id),
+                remove_columns=stage1.column_names,
+            )
+            print(f"mapped to user/assistant: {len(conv)} examples", end=" … ")
 
-            stage2 = stage1.filter(
-                token_ok,
+            # ——— Stage 3: accurate token-count filter ———
+            def token_ok_batch(examples):
+                texts = [
+                    u + tokenizer.eos_token + a
+                    for u, a in zip(examples["user"], examples["assistant"])
+                ]
+                toks = tokenizer(texts, add_special_tokens=False)
+                return [len(ids) <= max_length for ids in toks["input_ids"]]
+
+            stage2 = conv.filter(
+                token_ok_batch,
                 batched=True,
                 batch_size=1000,
             )
-            print(f"after token-filter: {len(stage2)} kept", end=" … ")
+            print(f"after token-filter: {len(stage2)}/{len(conv)}", end=" … ")
 
-            # ——— Final map to {user,assistant} ———
-            conv = stage2.map(
-                lambda ex: to_conversation(ex, ds_id),
-                remove_columns=stage2.column_names,
-                disable_tqdm=True,
-            )
-
-            all_splits[f"{ds_name}_{split}"] = conv
+            # ——— Collect filtered conversation ———
+            all_splits[f"{ds_name}_{split}"] = stage2
             print("done.")
 
     combined = DatasetDict(all_splits)

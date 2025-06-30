@@ -195,7 +195,10 @@ cython_debug/
 
 # Data files
 */data/*
-
+*.arrow
+*.parquet
+sft_training/stf_data/
+sft_training/sft_data_small_debug/
 
 checkpoints/
 wandb/
