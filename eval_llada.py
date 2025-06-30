@@ -17,6 +17,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer, AutoModel
 from new_generation import generate_with_dual_cache
+from generate import generate
 from init_model import init_model
 from accelerate import Accelerator
 
@@ -85,7 +86,7 @@ class LLaDAEvalHarness(LM):
             model_kwargs.update({'device_map': {'': f'{self.accelerator.device}'}})
 
         print(f"[LLaDAEvalHarness] Loading model from: {model_path}")
-        model, tokenizer = init_model(lora=True)
+        model, tokenizer = init_model()
         model = model.to(device)
         self.model = model
         self.tokenizer = tokenizer
@@ -273,8 +274,16 @@ class LLaDAEvalHarness(LM):
             prompt = elem["question"].unsqueeze(0).to(self.device)
             stop_tokens = elem["until"]
  
-            generated_answer = generate_with_dual_cache(self.model, prompt, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length,
+            generated_answer, _ = generate_with_dual_cache(self.model, prompt, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length,
         temperature=0.0, remasking='low_confidence')
+            # print(f"--- Debug Info for Request ---")
+            # print(f"Prompt shape: {prompt.shape}")
+            # print(f"Generated output tensor shape (from `generate`): {generated_answer.shape}")
+            # print(f"Expected generated part start index (prompt.shape[1]): {prompt.shape[1]}")
+
+            # # Check if the slice is empty
+            # if generated_answer.shape[1] <= prompt.shape[1]:
+            #     print("WARNING: Generated output tensor is not longer than the prompt! No new tokens were generated.")
             
             generated_answer = self.tokenizer.decode(generated_answer[0][prompt.shape[1]:], skip_special_tokens=False)
             for stop_seq in stop_tokens:

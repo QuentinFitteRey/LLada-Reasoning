@@ -6,9 +6,9 @@ import os
 
 adapter_path = os.path.expanduser("~/scratch/LLaDA_checkpoints/test_checkpoint")
 
-def init_model(lora=False):
+def init_model(lora=True):
     # Path to your local directory containing the modified model
-    local_model_path = "./llada_local" 
+    local_model_path = "./llada_local_trained"  # Adjust this path as needed
 
 
     print(f"Loading tokenizer from: {local_model_path}")

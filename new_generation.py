@@ -151,7 +151,7 @@ def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transf
 
 def main():
     device = 'cuda'
-    model, tokenizer = init_model(lora=True)
+    model, tokenizer = init_model()
     model = model.to(device)
 
     prompt = "Donald Trump is the former president of the United States."
