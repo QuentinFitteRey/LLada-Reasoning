@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
+import os
 import argparse
-import itertools
-from datasets import load_dataset, Dataset, DatasetDict
+from datasets import load_dataset, DatasetDict, concatenate_datasets
 from transformers import AutoTokenizer
-from tqdm.auto import tqdm
 
-# Configuration
+# ——— Configuration defaults ———
 DATASETS = [
     "nvidia/Llama-Nemotron-Post-Training-Dataset",
     "bespokelabs/Bespoke-Stratos-17k",
@@ -13,20 +12,19 @@ DATASETS = [
     "databricks/databricks-dolly-15k",
     "Open-Orca/SlimOrca",
 ]
-DEBUG = False  # Toggle for quick local testing
-MAX_DEBUG_EXAMPLES = 500  # For DEBUG mode
-MAX_EXAMPLES = 500_000    # Final cap after filtering
+AVG_CHARS_PER_TOKEN = 4
 
-
-def to_conversation(example, ds_id: str):
+def to_conversation(example, ds_id):
     if ds_id.startswith("nvidia/Llama-Nemotron"):
         user = " ".join(msg.get("content", "") for msg in example.get("input", []))
         return {"user": user, "assistant": example.get("output", "")}
+
     if ds_id == "databricks/databricks-dolly-15k":
         instr = example.get("instruction", "").strip()
         ctx = example.get("context", "").strip()
         prompt = f"{instr}\n\n{ctx}" if ctx else instr
         return {"user": prompt, "assistant": example.get("response", "")}
+
     if "system" in example and "conversations" in example:
         sys_p = example.get("system", "").strip()
         users, assists = [], []
@@ -40,75 +38,130 @@ def to_conversation(example, ds_id: str):
         user_str = (sys_p + "\n\n") if sys_p else ""
         user_str += " ".join(users)
         return {"user": user_str, "assistant": " ".join(assists)}
-    # Fallback
+
+    # fallback
     joined = "\n".join(f"{k}: {v}" for k, v in example.items())
     return {"user": joined, "assistant": ""}
 
+def preprocess_batch(examples, ds_id, tokenizer, max_len, char_limit):
+    # 1) build and char-filter conversations
+    convs = []
+    N = len(next(iter(examples.values())))
+    for i in range(N):
+        rec = {col: examples[col][i] for col in examples}
+        c = to_conversation(rec, ds_id)
+        if len(c["user"]) + len(c["assistant"]) <= char_limit:
+            convs.append(c)
 
-def process_stream(ds_id: str, tokenizer, max_length: int, char_limit: int):
-    """
-    Stream through all splits, apply filters, and collect up to MAX_EXAMPLES.
-    """
-    collected = []
-    # Attempt to stream SFT subset
+    # 2) batch-tokenize
+    texts = [c["user"] + tokenizer.eos_token + c["assistant"] for c in convs]
+    tok = tokenizer(texts, add_special_tokens=False)
+
+    # 3) keep only those under max_len
+    keeps = [i for i, ids in enumerate(tok["input_ids"]) if len(ids) <= max_len]
+
+    return {
+        "user":      [convs[i]["user"] for i in keeps],
+        "assistant": [convs[i]["assistant"] for i in keeps],
+    }
+
+def process_dataset(ds_id, tokenizer, max_length, max_examples, num_proc, batch_size, debug):
+    char_limit = AVG_CHARS_PER_TOKEN * max_length
+
+    # 1) load raw
     try:
-        ds_stream = load_dataset(ds_id, "SFT", streaming=True)
-        print(f"→ Streaming SFT splits: {list(ds_stream.keys())}")
-    except Exception:
-        ds_stream = load_dataset(ds_id, streaming=True)
-        print(f"→ Streaming default splits: {list(ds_stream.keys())}")
+        raw = load_dataset(ds_id, "SFT")
+    except:
+        raw = load_dataset(ds_id)
+    if not isinstance(raw, DatasetDict):
+        raw = DatasetDict({"train": raw})
 
-    # Chain all split generators
-    iterators = [ds_stream[k] for k in ds_stream]
-    flat_iter = itertools.chain.from_iterable(iterators)
-    total = MAX_DEBUG_EXAMPLES if DEBUG else MAX_EXAMPLES
+    # debug: cap each split to 500 examples
+    if debug:
+        for split in raw:
+            n = min(500, len(raw[split]))
+            raw[split] = raw[split].select(range(n))
 
-    for ex in tqdm(flat_iter, desc=f"Collecting {ds_id}", total=total):
-        conv = to_conversation(ex, ds_id)
-        # quick char filter
-        if len(conv["user"]) + len(conv["assistant"]) > char_limit:
-            continue
-        # token filter
-        ids = tokenizer(conv["user"] + tokenizer.eos_token + conv["assistant"], add_special_tokens=False)["input_ids"]
-        if len(ids) > max_length:
-            continue
-        collected.append({"user": conv["user"], "assistant": conv["assistant"]})
-        # stop early once we have enough
-        if len(collected) >= total:
-            break
+    # 2) preslice: combine splits → train/test → cap 2×max_examples
+    splits = dict(raw)
+    val = splits.pop("validation", None) or splits.pop("valid", None) or splits.pop("test", None)
+    train = concatenate_datasets(list(splits.values()))
+    if val is None:
+        tmp   = train.train_test_split(test_size=0.2, seed=42)
+        train, val = tmp["train"], tmp["test"]
+    capN = min(len(train), max_examples * 2)
+    train = train.shuffle(seed=42).select(range(capN))
 
-    print(f"→ Collected {len(collected)} examples from {ds_id}")
-    # Build dataset and split
-    ds = Dataset.from_list(collected)
-    ds = ds.shuffle(seed=42)
-    split = ds.train_test_split(test_size=0.2, seed=42)
-    return split
+    # 3) filter by raw char count
+    def char_ok(ex):
+        c = to_conversation(ex, ds_id)
+        return len(c["user"]) + len(c["assistant"]) <= char_limit
 
+    train = train.filter(char_ok, num_proc=num_proc)
+    val   = val.filter(char_ok,   num_proc=num_proc)
 
-def prepare_data(output_path: str, model_name: str, max_length: int):
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
-    avg_chars_per_token = 4
-    char_limit = avg_chars_per_token * max_length
-    all_splits = {}
+    # 4) map/tokenize & filter by token length
+    train = train.map(
+        lambda batch: preprocess_batch(batch, ds_id, tokenizer, max_length, char_limit),
+        batched=True,
+        batch_size=batch_size,
+        num_proc=num_proc,
+        remove_columns=train.column_names,
+    )
+    val = val.map(
+        lambda batch: preprocess_batch(batch, ds_id, tokenizer, max_length, char_limit),
+        batched=True,
+        batch_size=batch_size,
+        num_proc=num_proc,
+        remove_columns=val.column_names,
+    )
+
+    # 5) cap final train to max_examples
+    if not debug:
+        train = train.shuffle(seed=42)
+        if len(train) > max_examples:
+            train = train.select(range(max_examples))
+    # always shuffle validation for consistency
+    val = val.shuffle(seed=42)
+
+    return DatasetDict({"train": train, "validation": val})
+
+def main():
+    parser = argparse.ArgumentParser("SFT Data Prep (no caching)")
+    parser.add_argument("--model_name",  type=str, default="../llada_local_instruct")
+    parser.add_argument("--max_length",  type=int, default=8192)
+    parser.add_argument("--max_examples",type=int, default=500000)
+    parser.add_argument("--num_proc",    type=int, default=24)
+    parser.add_argument("--batch_size",  type=int, default=1000)
+    parser.add_argument("--out",         type=str, default="./sft_data")
+    parser.add_argument("--debug",       action="store_true",
+                        help="cap each split to 500 examples for quick testing")
+    args = parser.parse_args()
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
+    combined = {}
 
     for ds_id in DATASETS:
         print(f"\n🔍 Processing dataset: {ds_id}")
-        split = process_stream(ds_id, tokenizer, max_length, char_limit)
-        all_splits[f"{ds_id.split('/')[-1]}_train"] = split["train"]
-        all_splits[f"{ds_id.split('/')[-1]}_validation"] = split["test"]
+        ds = process_dataset(
+            ds_id,
+            tokenizer,
+            args.max_length,
+            args.max_examples,
+            args.num_proc,
+            args.batch_size,
+            args.debug,
+        )
+        name = ds_id.split("/")[-1]
+        combined[f"{name}_train"]      = ds["train"]
+        combined[f"{name}_validation"] = ds["validation"]
 
-    combined = DatasetDict(all_splits)
-    combined.save_to_disk(output_path)
-    print(f"\n✅ Saved to {output_path}")
-
+    # combine and save
+    combined_dd  = DatasetDict(combined)
+    out_dir      = os.path.join(args.out, "combined")
+    os.makedirs(out_dir, exist_ok=True)
+    combined_dd.save_to_disk(out_dir)
+    print(f"\n✅ All datasets combined and saved to {out_dir}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("Stream & filter SFT data for SFT training")
-    parser.add_argument("--model_name", type=str, default="../llada_local_instruct")
-    parser.add_argument("--max_length", type=int, default=8192)
-    parser.add_argument("--out", type=str, default="./sft_data")
-    args = parser.parse_args()
-
-    print(f"Preparing SFT data into {args.out} with max {args.max_length} tokens…")
-    prepare_data(args.out, args.model_name, args.max_length)
-    print("Done.")
+    main()

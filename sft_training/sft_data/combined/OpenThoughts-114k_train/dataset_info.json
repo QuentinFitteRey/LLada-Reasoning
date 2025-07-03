@@ -1,0 +1,70 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "open_thoughts-114k",
+  "dataset_size": 2635015668,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/open-thoughts/OpenThoughts-114k@c689727544eecabaa074c04ac2d73ee06783c8e0/data/train-00000-of-00006.parquet": {
+      "num_bytes": 250112845,
+      "checksum": null
+    },
+    "hf://datasets/open-thoughts/OpenThoughts-114k@c689727544eecabaa074c04ac2d73ee06783c8e0/data/train-00001-of-00006.parquet": {
+      "num_bytes": 174927578,
+      "checksum": null
+    },
+    "hf://datasets/open-thoughts/OpenThoughts-114k@c689727544eecabaa074c04ac2d73ee06783c8e0/data/train-00002-of-00006.parquet": {
+      "num_bytes": 173224824,
+      "checksum": null
+    },
+    "hf://datasets/open-thoughts/OpenThoughts-114k@c689727544eecabaa074c04ac2d73ee06783c8e0/data/train-00003-of-00006.parquet": {
+      "num_bytes": 174141582,
+      "checksum": null
+    },
+    "hf://datasets/open-thoughts/OpenThoughts-114k@c689727544eecabaa074c04ac2d73ee06783c8e0/data/train-00004-of-00006.parquet": {
+      "num_bytes": 154003137,
+      "checksum": null
+    },
+    "hf://datasets/open-thoughts/OpenThoughts-114k@c689727544eecabaa074c04ac2d73ee06783c8e0/data/train-00005-of-00006.parquet": {
+      "num_bytes": 152367227,
+      "checksum": null
+    }
+  },
+  "download_size": 1078777193,
+  "features": {
+    "user": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "assistant": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 3713792861,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 2635015668,
+      "num_examples": 113957,
+      "shard_lengths": [
+        16000,
+        20993,
+        22986,
+        22993,
+        25993,
+        4992
+      ],
+      "dataset_name": "open_thoughts-114k"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "builder_name": "json",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "databricks-dolly-15k",
+  "dataset_size": 12195589,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/databricks/databricks-dolly-15k@bdd27f4d94b9c1f951818a7da7fd7aeea5dbff1a/databricks-dolly-15k.jsonl": {
+      "num_bytes": 13085339,
+      "checksum": null
+    }
+  },
+  "download_size": 13085339,
+  "features": {
+    "user": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "assistant": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 25280928,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 12195589,
+      "num_examples": 15011,
+      "dataset_name": "databricks-dolly-15k"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}

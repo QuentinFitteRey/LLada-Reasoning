@@ -25,10 +25,10 @@ echo "SFT Training: Job $JOBID has started!" | mail -s "SLURM Job Started!" mout
 export PYTHONPATH=$PWD
 
 srun torchrun --nproc_per_node=1 -m sft_training.sft_train \
-  --sft-data     ./sft_training/sft_data_small_debug \
+  --sft-data     ./sft_training/sft_data/combined \
   --pretrained-model ./llada_local \
   --output-dir   ./checkpoints/sft_lora_run \
-  --lora-resume /storage/home/hcoda1/0/jmoutahir3/scratch/LLaDA_checkpoints/new_test_checkpoint \
+  --lora-resume /home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/new_test_checkpoint \
   --use-lora \
   --lora-r       16 \
   --lora-alpha   32 \

@@ -1,0 +1,42 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "bespoke-stratos-17k",
+  "dataset_size": 310727664,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/bespokelabs/Bespoke-Stratos-17k@9e9adba943911a9fc44dffcb30aaa18dc96ae6df/data/train-00000-of-00001.parquet": {
+      "num_bytes": 125307344,
+      "checksum": null
+    }
+  },
+  "download_size": 125307344,
+  "features": {
+    "user": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "assistant": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 436035008,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 310727664,
+      "num_examples": 16710,
+      "dataset_name": "bespoke-stratos-17k"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}

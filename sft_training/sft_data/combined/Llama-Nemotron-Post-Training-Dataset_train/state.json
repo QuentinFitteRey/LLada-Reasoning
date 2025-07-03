@@ -1,0 +1,22 @@
+{
+  "_data_files": [
+    {
+      "filename": "data-00000-of-00003.arrow"
+    },
+    {
+      "filename": "data-00001-of-00003.arrow"
+    },
+    {
+      "filename": "data-00002-of-00003.arrow"
+    }
+  ],
+  "_fingerprint": "528f6d00b612b91d",
+  "_format_columns": [
+    "assistant",
+    "user"
+  ],
+  "_format_kwargs": {},
+  "_format_type": null,
+  "_output_all_columns": false,
+  "_split": null
+}
