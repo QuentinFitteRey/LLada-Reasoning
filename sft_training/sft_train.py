@@ -98,7 +98,7 @@ def main():
     parser.add_argument('--local-batch',      type=int,   default=1,
                         help='Per-GPU batch size')
     parser.add_argument('--seq-len',          type=int,   default=8192)
-    parser.add_argument('--max-steps',        type=int,   default=1000)
+    # parser.add_argument('--max-steps',        type=int,   default=1000) # Not used in the paper so removed
     parser.add_argument('--epochs',           type=int,   default=3)
     parser.add_argument('--lr',               type=float, default=5e-5)
     parser.add_argument('--weight-decay',     type=float, default=0.0)
@@ -216,12 +216,6 @@ def main():
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr, weight_decay=args.weight_decay
     )
-    def lr_fn(step):
-        if step < args.warmup_steps:
-            return step / max(1, args.warmup_steps)
-        prog = (step - args.warmup_steps) / max(1, args.max_steps - args.warmup_steps)
-        return max(args.min_lr_ratio, 1.0 - prog * (1.0 - args.min_lr_ratio))
-    scheduler = LambdaLR(optimizer, lr_fn)
 
     accum_steps = args.batch_size // (args.local_batch * world_size)
     
@@ -281,7 +275,7 @@ def main():
 
                 if is_main:
                     train_loss = (loss.item() * accum_steps)
-                    print(f"[Epoch {epoch+1}] Step {global_step}/{args.max_steps} — train_loss: {train_loss:.4f}")
+                    print(f"[Epoch {epoch+1}] Step {global_step}/{total_training_steps:.0f} - train_loss: {train_loss:.4f}")
                     if args.use_wandb:
                         wandb.log({"train/loss": train_loss, "step": global_step})
 
