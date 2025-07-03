@@ -224,6 +224,26 @@ def main():
     scheduler = LambdaLR(optimizer, lr_fn)
 
     accum_steps = args.batch_size // (args.local_batch * world_size)
+    
+    # how many optimizer steps per epoch?
+    num_update_steps_per_epoch = len(train_loader) // accum_steps
+    total_training_steps = num_update_steps_per_epoch * args.epochs
+
+    # warmup_steps now from args (default=50)
+    warmup_steps = args.warmup_steps
+
+    def lr_fn(step):
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+        # constant until last 10%
+        if step < 0.9 * total_training_steps:
+            return 1.0
+        # linear decay to min_lr_ratio over final 10%
+        prog = (step - 0.9 * total_training_steps) / (0.1 * total_training_steps)
+        return max(args.min_lr_ratio, 1.0 - prog * (1.0 - args.min_lr_ratio))
+
+    scheduler = LambdaLR(optimizer, lr_fn)
+
     global_step = 0
 
     # initial validation
@@ -287,10 +307,10 @@ def main():
                     print(f"Checkpoint saved to {ckpt_dir}")
                     dist.barrier()
 
-                if global_step >= args.max_steps:
-                    break
-        if global_step >= args.max_steps:
-            break
+        #         if global_step >= args.max_steps:
+        #             break
+        # if global_step >= args.max_steps:
+        #     break
 
     # final save
     if is_main:

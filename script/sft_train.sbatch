@@ -25,22 +25,19 @@ echo "SFT Training: Job $JOBID has started!" | mail -s "SLURM Job Started!" mout
 export PYTHONPATH=$PWD
 
 srun torchrun --nproc_per_node=1 -m sft_training.sft_train \
-  --sft-data     ./sft_training/sft_data/combined \
-  --pretrained-model ./llada_local \
-  --output-dir   ./checkpoints/sft_lora_run \
-  --lora-resume /home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/new_test_checkpoint \
+  --sft-data            ./sft_training/sft_data/combined \
+  --pretrained-model    ./llada_local \
+  --output-dir          ./checkpoints/sft_lora_run \
   --use-lora \
-  --lora-r       16 \
-  --lora-alpha   32 \
-  --lora-dropout 0.05 \
-  --batch-size   64 \
-  --local-batch  1 \
-  --seq-len      8192 \
-  --lr           5e-5 \
-  --epochs       3 \
-  --max-steps    1000 \
-  --warmup-steps 100 \
+  --lora-resume         /home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/new_test_checkpoint \
+  --batch-size          256 \
+  --local-batch         2 \
+  --seq-len             8192 \
+  --lr                  2.5e-5 \
+  --weight-decay        0.1 \
+  --warmup-steps        50 \
+  --epochs              3 \
   --validation-interval 100 \
   --checkpoint-interval 100 \
   --use-wandb \
-  --wandb-project llada-sft
+  --wandb-project       llada-sft
