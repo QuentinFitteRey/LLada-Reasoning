@@ -293,12 +293,13 @@ def main():
                     dist.barrier()
 
                 # checkpoint interval
-                if global_step % args.checkpoint_interval == 0 and is_main:
+                if global_step % args.checkpoint_interval == 0:
                     ckpt_dir = os.path.join(args.output_dir, f"step-{global_step}")
                     os.makedirs(ckpt_dir, exist_ok=True)
-                    model.module.save_pretrained(ckpt_dir)
-                    tokenizer.save_pretrained(ckpt_dir)
-                    print(f"Checkpoint saved to {ckpt_dir}")
+                    if is_main:
+                        model.module.save_pretrained(ckpt_dir)
+                        tokenizer.save_pretrained(ckpt_dir)
+                        print(f"Checkpoint saved to {ckpt_dir}")
                     dist.barrier()
 
         #         if global_step >= args.max_steps:

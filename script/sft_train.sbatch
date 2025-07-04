@@ -11,7 +11,7 @@
 
 module load anaconda3
 conda activate ~/scratch/envs/llada
-cd /storage/home/hcoda1/0/jmoutahir3/scratch/LLada-Reasoning
+cd /home/hice1/jmoutahir3/scratch/LLada-Reasoning
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
