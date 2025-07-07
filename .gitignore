@@ -203,3 +203,8 @@ sft_training/sft_data_small_debug/
 checkpoints/
 wandb/
 data_pretrain/
+data_pretrain_stratified/
+
+merged_model/
+sft_data/
+validation/
