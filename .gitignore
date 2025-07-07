@@ -200,3 +200,5 @@ cython_debug/
 checkpoints/
 wandb/
 data_pretrain/
+validation/
+data_pretrain_stratified/

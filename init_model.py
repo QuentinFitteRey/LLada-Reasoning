@@ -24,6 +24,7 @@ def init_model(lora=True):
         # device_map="auto",
         # load_in_8bit=True 
         local_files_only=True,  # Ensure it loads from local files only
+        attn_implementation = "flash_attention_2"
     )
     print("Model loaded successfully with local modifications.")
 
