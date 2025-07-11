@@ -42,7 +42,9 @@ def set_seed(seed):
 class LLaDAEvalHarness(LM):
     def __init__(
         self,
-        model_path='',
+        model_path: str = "./llada_local",
+        adapter_path: str | None = None,
+        load_lora: bool = False,
         mask_id=126336,
         max_length=4096,
         batch_size=32,
@@ -51,7 +53,7 @@ class LLaDAEvalHarness(LM):
         cfg=0.,
         steps=1024,
         gen_length=1024,
-        block_length=1024,
+        block_length=64,
         remasking='low_confidence',
         device="cuda",
         **kwargs,
@@ -74,6 +76,9 @@ class LLaDAEvalHarness(LM):
             cfg_scale: Unsupervised classifier-free guidance scale.
         '''
         super().__init__()
+        self.model_path = model_path
+        self.adapter_path = adapter_path
+        self.load_lora = load_lora
 
         accelerator = accelerate.Accelerator()
         if accelerator.num_processes > 1:
@@ -85,8 +90,16 @@ class LLaDAEvalHarness(LM):
         if self.accelerator is not None:
             model_kwargs.update({'device_map': {'': f'{self.accelerator.device}'}})
 
-        print(f"[LLaDAEvalHarness] Loading model from: {model_path}")
-        model, tokenizer = init_model()
+        print(f"[LLaDAEvalHarness] Loading model from: {self.model_path}"
+              f"{' + adapter=' + self.adapter_path if self.adapter_path else ''}"
+              f" (LoRA={'yes' if self.load_lora else 'no'})")
+        model, tokenizer = init_model(
+            model_path=self.model_path,
+            adapter_path=self.adapter_path,
+            load_lora=self.load_lora,
+            device=device,
+            torch_dtype=torch.bfloat16,
+        )
         model = model.to(device)
         self.model = model
         self.tokenizer = tokenizer
@@ -256,6 +269,16 @@ class LLaDAEvalHarness(LM):
     def loglikelihood_rolling(self, requests):
         raise NotImplementedError
 
+    def apply_chat_template(self, chat_history: list[dict[str,str]]) -> str:
+        user_msg = chat_history[-1]["content"]
+        return (
+            f"{self.tokenizer.bos_token}"
+            f"{self.tokenizer.start_token}user{self.tokenizer.end_token}\n"
+            f"{user_msg}"
+            f"{self.tokenizer.eot_token}"
+            f"{self.tokenizer.start_token}assistant{self.tokenizer.end_token}\n"
+        )
+
     def generate_until(self, requests: list[Instance]):
         def _tokenize(e):
             return {
@@ -271,11 +294,26 @@ class LLaDAEvalHarness(LM):
 
         out = []
         for elem in tqdm(ds, desc="Generating..."):
-            prompt = elem["question"].unsqueeze(0).to(self.device)
-            stop_tokens = elem["until"]
- 
-            generated_answer, _ = generate_with_dual_cache(self.model, prompt, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length,
-        temperature=0.0, remasking='low_confidence')
+            # 1) wrap the question in a chat template
+            raw = elem["question_text"]
+            chat_history = [{"role":"user","content": raw}]
+            prompt_str   = self.apply_chat_template(chat_history)
+
+            # 2) tokenize
+            prompt_ids = self.tokenizer(prompt_str)["input_ids"]
+            prompt = torch.tensor([prompt_ids], device=self.device)
+
+            # 3) generate
+            generated_ids, _ = generate_with_dual_cache(
+                self.model,
+                prompt,
+                steps=self.steps,
+                gen_length=self.gen_length,
+                block_length=self.block_length,
+                temperature=0.0,
+                remasking="low_confidence",
+            )
+
             # print(f"--- Debug Info for Request ---")
             # print(f"Prompt shape: {prompt.shape}")
             # print(f"Generated output tensor shape (from `generate`): {generated_answer.shape}")
@@ -284,18 +322,24 @@ class LLaDAEvalHarness(LM):
             # # Check if the slice is empty
             # if generated_answer.shape[1] <= prompt.shape[1]:
             #     print("WARNING: Generated output tensor is not longer than the prompt! No new tokens were generated.")
-            
-            generated_answer = self.tokenizer.decode(generated_answer[0][prompt.shape[1]:], skip_special_tokens=False)
-            for stop_seq in stop_tokens:
-                    if stop_seq in generated_answer:
-                        generated_answer = generated_answer.split(stop_seq)[0]
 
-            # remove special tokens
-            generated_answer_ids = self.tokenizer(generated_answer)["input_ids"]
-            generated_answer = self.tokenizer.decode(generated_answer_ids, skip_special_tokens=True)
-            out.append(generated_answer)
+            # 4) strip off the prompt tokens and decode
+            gen_part = generated_ids[0, len(prompt_ids) :]
+            text = self.tokenizer.decode(gen_part, skip_special_tokens=False)
 
-            self.accelerator.wait_for_everyone()
+            # 5) stop‐token trimming
+            for stop_seq in elem["until"]:
+                if stop_seq in text:
+                    text = text.split(stop_seq)[0]
+
+            # 6) remove any stray special tokens
+            final_ids = self.tokenizer(text)["input_ids"]
+            clean = self.tokenizer.decode(final_ids, skip_special_tokens=True)
+
+            out.append(clean)
+
+            if self.accelerator is not None:
+                self.accelerator.wait_for_everyone()
 
         return out
 

@@ -202,3 +202,5 @@ wandb/
 data_pretrain/
 validation/
 data_pretrain_stratified/
+evaluate_logs/
+eval_logs/
