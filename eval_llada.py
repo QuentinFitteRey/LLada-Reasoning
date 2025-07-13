@@ -269,14 +269,39 @@ class LLaDAEvalHarness(LM):
     def loglikelihood_rolling(self, requests):
         raise NotImplementedError
 
-    def apply_chat_template(self, chat_history: list[dict[str,str]]) -> str:
+    def apply_chat_template(
+        self,
+        chat_history: list[dict[str, str]],
+        use_thinking: bool = True
+    ) -> str:
+        """
+        If use_thinking is True, we prefix the user message with the
+        thinking_mode instructions; otherwise with not_thinking_mode.
+        """
+
+        thinking_mode = """You must think step by step and provide detailed thinking on the problem before giving the final answer.
+        You must put your thinking process between <think> and </think> tags and then output the final answer with a summary of your thinking process.
+        In your thinking process, this requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop a well-considered thinking process.
+        """
+        not_thinking_mode = """You are not required to have detailed thinking on the problem between <think> and </think> tags.
+        You can provide a direct answer to the question without detailed thinking.
+        You can still take steps to solve the problem, but you do not need to provide detailed thinking on the problem.
+        """
+
+        # grab the last user message
         user_msg = chat_history[-1]["content"]
+
+        # choose the appropriate instruction prefix
+        prefix = thinking_mode if use_thinking else not_thinking_mode
+
+        # build and return the full prompt
         return (
-            f"{self.tokenizer.bos_token}"
-            f"{self.tokenizer.start_token}user{self.tokenizer.end_token}\n"
+            f"{prefix}"
+            "<BOS>"
+            "<start_id>user<end_id>\n"
             f"{user_msg}"
-            f"{self.tokenizer.eot_token}"
-            f"{self.tokenizer.start_token}assistant{self.tokenizer.end_token}\n"
+            "<eot_id>"
+            "<start_id>assistant<end_id>\n"
         )
 
     def generate_until(self, requests: list[Instance]):

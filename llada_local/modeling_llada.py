@@ -869,10 +869,10 @@ class LLaDABlock(nn.Module):
                 # Get the indices that need to be replaced
                 replace_indices = replace_position.nonzero(as_tuple=True)[1]  # [selected_length]
                 # Use scatter operation to perform replacement
-                past_key[:, :, replace_indices] = k
+                past_key[:, :, replace_indices] = k.to(past_key.dtype)  # Ensure k is in the same dtype as past_key
                 k = past_key
                 # Perform the same operation for value
-                past_value[:, :, replace_indices] = v
+                past_value[:, :, replace_indices] = v.to(past_value.dtype)  # Ensure v is in the same dtype as past_value
                 v = past_value
 
         present = (k, v) if use_cache else None #present: None
