@@ -27,6 +27,7 @@ import json
 import datetime
 import os
 from contextlib import redirect_stdout
+from functools import partial
 
 
 def set_seed(seed):
@@ -296,25 +297,31 @@ class LLaDAEvalHarness(LM):
 
         # build and return the full prompt
         return (
-            f"{prefix}"
             "<BOS>"
             "<start_id>user<end_id>\n"
+            f"{prefix}\n"
             f"{user_msg}"
             "<eot_id>"
             "<start_id>assistant<end_id>\n"
         )
 
+    def llada_generate_until_tokenize(self, e, idx, tokenizer):
+        return {
+            "question": tokenizer(e["question"])["input_ids"],
+            "question_text": e["question"],
+            "until": e["until"],
+        }
+
     def generate_until(self, requests: list[Instance]):
-        def _tokenize(e):
-            return {
-                "question": self.tokenizer(e["question"])["input_ids"],
-                "question_text": e["question"],
-                "until": e["until"],
-            }
 
         ds = [{"question": req.args[0], "until": req.args[1]['until']} for req in requests]
         ds = Dataset.from_list(ds)
-        ds = ds.map(_tokenize)
+        ds = ds.map(
+            self.llada_generate_until_tokenize,
+            fn_kwargs={"tokenizer": self.tokenizer},
+            batched=False,
+            with_indices=True,
+        )
         ds = ds.with_format("torch")
 
         out = []

@@ -27,6 +27,16 @@ def init_model(
         local_files_only=local_files_only
     )
 
+    special_tokens_to_add = {
+    "additional_special_tokens": ["<|mdm_mask|>", "<think>", "</think>"]
+    }
+
+    if tokenizer.pad_token is None:
+        special_tokens_to_add["pad_token"] = "<|pad|>"
+
+    # Add tokens to tokenizer
+    tokenizer.add_special_tokens(special_tokens_to_add)
+
     print(f"Loading modified model from: {local_model_path}")
     model = AutoModelForCausalLM.from_pretrained(
         local_model_path,
@@ -34,6 +44,10 @@ def init_model(
         local_files_only=local_files_only,
         torch_dtype=torch_dtype,
     )
+
+    # Resize embeddings of the entire PeftModel
+    model.resize_token_embeddings(len(tokenizer))
+
     print("Model loaded successfully with local modifications.")
 
     load_kwargs = {

@@ -204,3 +204,4 @@ validation/
 data_pretrain_stratified/
 evaluate_logs/
 eval_logs/
+test_logs/

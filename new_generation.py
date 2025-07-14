@@ -151,10 +151,33 @@ def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transf
 
 def main():
     device = 'cuda'
-    model, tokenizer = init_model()
+    model, tokenizer = init_model(
+        model_path = "/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/merged_pretrained_model/merged_model_good_base",
+        adapter_path = "/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/step-600",
+        load_lora = True,
+        device  = "cuda"
+    )
     model = model.to(device)
 
-    prompt = "Donald Trump is the former president of the United States."
+    use_thinking = True
+
+    # Example reasoning question
+    question = "You have a 3-gallon jug and a 5-gallon jug, neither of which has any measurement markings, and an unlimited water supply. Using only these two jugs, measure out exactly 4 gallons of water."
+
+    thinking_mode = """You must think step by step and provide detailed thinking on the problem before giving the final answer.
+        You must put your thinking process between <think> and </think> tags and then output the final answer with a summary of your thinking process.
+        In your thinking process, this requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop a well-considered thinking process.
+        """
+    not_thinking_mode = """You are not required to have detailed thinking on the problem between <think> and </think> tags.
+    You can provide a direct answer to the question without detailed thinking.
+    You can still take steps to solve the problem, but you do not need to provide detailed thinking on the problem.
+    """
+
+    if use_thinking:
+        prompt = f"<BOS><start_id>user<end_id>\n{thinking_mode}\n{question}<eot_id><start_id>assistant<end_id>\n"
+    else:
+        prompt = f"<BOS><start_id>user<end_id>\n{not_thinking_mode}\n{question}<eot_id><start_id>assistant<end_id>\n"
+
     input_ids = torch.tensor(tokenizer(prompt)['input_ids']).to(device).unsqueeze(0)
 
     t0 = torch.cuda.Event(enable_timing=True)
@@ -162,14 +185,14 @@ def main():
     t0.record()
     out, _ = generate_with_dual_cache(
         model, input_ids,
-        steps=128, gen_length=128, block_length=32,
+        steps=1024, gen_length=1024, block_length=64,
         temperature=0.0, remasking='low_confidence'
     )
     t1.record(); torch.cuda.synchronize()
     print(f"Generation time: {t0.elapsed_time(t1)/1000:.2f}s")
 
     text = tokenizer.batch_decode(
-        out[:, input_ids.shape[1]:], skip_special_tokens=True
+        out[:, input_ids.shape[1]:], skip_special_tokens=False
     )[0]
     print(text)
 
