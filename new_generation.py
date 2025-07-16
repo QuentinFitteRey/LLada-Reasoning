@@ -153,6 +153,7 @@ def main():
     device = 'cuda'
     model, tokenizer = init_model()
     model = model.to(device)
+    model.gradient_checkpointing_enable()
 
     prompt = "Donald Trump is the former president of the United States."
     input_ids = torch.tensor(tokenizer(prompt)['input_ids']).to(device).unsqueeze(0)

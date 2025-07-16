@@ -4,13 +4,16 @@ import os
 from datetime import datetime
 
 from transformers.trainer import get_scheduler
+from init_model import init_model
+from llada_actor import LLadaActor
 
 from openrlhf.datasets import RewardDataset
 from openrlhf.datasets.utils import blending_datasets
-from openrlhf.models import Actor
 from dpo_trainer import DPOTrainer
 from openrlhf.utils import get_strategy, get_tokenizer
 
+import os
+os.environ["MASTER_PORT"] = "42000"
 
 def train(args):
     # configure strategy
@@ -19,8 +22,9 @@ def train(args):
 
     # configure model
     # load huggingface model
-    model = Actor(
-        args.pretrain,
+    pretrain, tokenizer = init_model()
+    model = LLadaActor(
+        pretrain,
         use_flash_attention_2=args.flash_attn,
         bf16=args.bf16,
         load_in_4bit=args.load_in_4bit,
@@ -34,12 +38,12 @@ def train(args):
     )
 
     # configure tokenizer
-    tokenizer = get_tokenizer(args.pretrain, model.model, "right", strategy, use_fast=not args.disable_fast_tokenizer)
+    # tokenizer = get_tokenizer(args.pretrain, model.model, "right", strategy, use_fast=not args.disable_fast_tokenizer)
     strategy.print(model)
 
     # load weights for ref model
-    ref_model = Actor(
-        args.ref_pretrain,
+    ref_model = LLadaActor(
+        pretrain,
         use_flash_attention_2=args.flash_attn,
         bf16=args.bf16,
         load_in_4bit=args.load_in_4bit,
@@ -48,7 +52,6 @@ def train(args):
     )
     if args.ref_offload:
         ref_model._offload = True
-    get_tokenizer(args.pretrain, ref_model.model, "right", strategy, use_fast=not args.disable_fast_tokenizer)
 
     # gradient_checkpointing
     if args.gradient_checkpointing:
@@ -68,6 +71,22 @@ def train(args):
         max_count=args.max_samples,
         dataset_split=args.dataset_split,
     )
+    def map_shp(example):
+        prompt = example["history"]
+        if example["labels"] == 1:
+            return {
+                "prompt": prompt,
+                "chosen": example["human_ref_B"],
+                "rejected": example["human_ref_A"]
+            }
+        else:
+            return {
+                "prompt": prompt,
+                "chosen": example["human_ref_A"],
+                "rejected": example["human_ref_B"]
+            }
+
+    train_data = train_data.map(map_shp)
 
     train_data = train_data.select(range(min(args.max_samples, len(train_data))))
     train_dataset = RewardDataset(
@@ -124,7 +143,10 @@ def train(args):
         num_training_steps=max_steps,
         scheduler_specific_kwargs={"min_lr": args.learning_rate * 0.1},
     )
-
+    trainable_params = [p for p in model.parameters()]
+    print(f"\n\n\n\nTrainable parameters: {len(trainable_params)}\n\n\n\n")
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    print(f"\n\n\n\nTrainable parameters: {len(trainable_params)}\n\n\n\n")
     # strategy prepare
     ((model, optim, scheduler), ref_model) = strategy.prepare((model, optim, scheduler), ref_model)
 

@@ -157,13 +157,11 @@ class DPOTrainer(ABC):
                 reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
                 r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
 
-                chosen_logps, rejected_logps = self.monte_carlo_forward(
-                    self.model, chosen_ids, c_mask, reject_ids, r_mask, prompt_id_lens
-                )
+                chosen_logps = -self.model(chosen_ids, c_mask, mode="monte_carlo")
+                rejected_logps = -self.model(reject_ids, r_mask, mode="monte_carlo")
                 with torch.no_grad():
-                    reference_chosen_logps, reference_rejected_logps = self.monte_carlo_forward(
-                        self.ref_model, chosen_ids, c_mask, reject_ids, r_mask, prompt_id_lens
-                    )
+                    reference_chosen_logps = -self.ref_model(chosen_ids, c_mask, mode="monte_carlo")
+                    reference_rejected_logps = -self.ref_model(reject_ids, r_mask, mode="monte_carlo")
 
                 # loss function
                 preference_loss, chosen_reward, reject_reward = self.loss_fn(
@@ -265,10 +263,10 @@ class DPOTrainer(ABC):
                 reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
                 r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
 
-                chosen_logps = -self.monte_carlo_forward(self.model, chosen_ids, c_mask)
-                rejected_logps = -self.monte_carlo_forward(self.model, reject_ids, r_mask)
-                reference_chosen_logps = -self.monte_carlo_forward(self.ref_model, chosen_ids, c_mask)
-                reference_rejected_logps = -self.monte_carlo_forward(self.ref_model, reject_ids, r_mask)
+                chosen_logps = -self.model(chosen_ids, c_mask, mode="monte_carlo")
+                rejected_logps = -self.model(reject_ids, r_mask, mode="monte_carlo")
+                chosen_logps = -self.ref_model(chosen_ids, c_mask, mode="monte_carlo")
+                rejected_logps = -self.ref_model(reject_ids, r_mask, mode="monte_carlo")
 
                 loss, chosen_reward, reject_reward = self.loss_fn(
                     chosen_logps, rejected_logps, reference_chosen_logps, reference_rejected_logps
@@ -325,7 +323,7 @@ class DPOTrainer(ABC):
         device = input_ids.device
         if l == 0: return None, 0.0
         noisy_input, masked, p_mask = self.forward_process(input_ids, t)
-        logits = model(input_ids=noisy_input, attention_mask=attention_mask).logits
+        logits = model(sequences=noisy_input, attention_mask=attention_mask).logits
         masked &= (input_ids != self.pad_id)
         if not masked.any(): return None, 0.0
         losses = F.cross_entropy(logits[masked], input_ids[masked], reduction="none")
