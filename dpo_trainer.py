@@ -157,15 +157,16 @@ class DPOTrainer(ABC):
                 reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
                 r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
 
-                chosen_logps = -self.model(chosen_ids, c_mask, mode="monte_carlo")
-                rejected_logps = -self.model(reject_ids, r_mask, mode="monte_carlo")
+                # chosen
+                chosen_logps, chosen_shared = self.model(chosen_ids, c_mask, mode="monte_carlo")
+                rejected_logps, rejected_shared = self.model(reject_ids, r_mask, mode="monte_carlo")
                 with torch.no_grad():
-                    reference_chosen_logps = -self.ref_model(chosen_ids, c_mask, mode="monte_carlo")
-                    reference_rejected_logps = -self.ref_model(reject_ids, r_mask, mode="monte_carlo")
+                    reference_chosen_logps, _ = self.ref_model(chosen_ids, c_mask, shared_mask=chosen_shared, mode="monte_carlo")
+                    reference_rejected_logps, _ = self.ref_model(reject_ids, r_mask, shared_mask=rejected_shared, mode="monte_carlo")
 
                 # loss function
                 preference_loss, chosen_reward, reject_reward = self.loss_fn(
-                    chosen_logps, rejected_logps, reference_chosen_logps, reference_rejected_logps
+                    -chosen_logps, -rejected_logps, -reference_chosen_logps, -reference_rejected_logps
                 )
                 # mixtral
                 if not self.aux_loss:
@@ -263,13 +264,13 @@ class DPOTrainer(ABC):
                 reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
                 r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
 
-                chosen_logps = -self.model(chosen_ids, c_mask, mode="monte_carlo")
-                rejected_logps = -self.model(reject_ids, r_mask, mode="monte_carlo")
-                chosen_logps = -self.ref_model(chosen_ids, c_mask, mode="monte_carlo")
-                rejected_logps = -self.ref_model(reject_ids, r_mask, mode="monte_carlo")
+                chosen_logps, chosen_shared = self.model(chosen_ids, c_mask, mode="monte_carlo")
+                rejected_logps, rejected_shared = self.model(reject_ids, r_mask, mode="monte_carlo")
+                reference_chosen_logps, _ = self.ref_model(chosen_ids, c_mask, shared_mask=chosen_shared, mode="monte_carlo")
+                reference_rejected_logps, _ = self.ref_model(reject_ids, r_mask, shared_mask=rejected_shared, mode="monte_carlo")
 
                 loss, chosen_reward, reject_reward = self.loss_fn(
-                    chosen_logps, rejected_logps, reference_chosen_logps, reference_rejected_logps
+                    -chosen_logps, -rejected_logps, -reference_chosen_logps, -reference_rejected_logps
                 )
                 acc_sum += (chosen_reward > reject_reward).float().mean().item()
                 loss_sum += loss.item()
@@ -291,55 +292,6 @@ class DPOTrainer(ABC):
                     for k, v in logs.items():
                         self._tensorboard.add_scalar(f"eval/{k}", v, steps)
         self.model.train()  # reset model state
-
-    def monte_carlo_forward(self, model, input_ids, input_mask, n_t=8, n_yt=1, eps=1e-6):
-        b = input_ids.size(0)
-        total_loss = torch.zeros(b, device=input_ids.device)
-        count = 0
-
-        for _ in range(n_t):
-            t = (1 - eps) * torch.rand(1).item() + eps
-            for _ in range(n_yt):
-                loss, _ = self.calc_loss(
-                    model,
-                    {
-                        "input_ids": input_ids,
-                        "attention_mask": input_mask,
-                    },
-                    t
-                )
-                if loss is not None:
-                    total_loss += loss  # loss is shape (B,)
-                    count += 1
-
-        if count == 0:
-            return torch.zeros(b, device=input_ids.device)
-        return total_loss / count  # shape: (B,)
-
-    def calc_loss(self, model, batch, t):
-        input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
-        b, l = input_ids.shape
-        device = input_ids.device
-        if l == 0: return None, 0.0
-        noisy_input, masked, p_mask = self.forward_process(input_ids, t)
-        logits = model(sequences=noisy_input, attention_mask=attention_mask).logits
-        masked &= (input_ids != self.pad_id)
-        if not masked.any(): return None, 0.0
-        losses = F.cross_entropy(logits[masked], input_ids[masked], reduction="none")
-        weighted = losses / p_mask[masked]
-        final_loss = weighted.sum(dim=1) / l  # (B,) per-sample loss
-        return final_loss, final_loss.mean().item()
-
-    def forward_process(self, input_ids, mask_ratio):
-        b, l = input_ids.shape
-        if isinstance(mask_ratio, torch.Tensor) and mask_ratio.ndim == 1: 
-            p_mask = mask_ratio.view(b, 1).expand(b, l)
-        else: 
-            p_mask = torch.full((b, l), mask_ratio, device=input_ids.device)
-        masked_indices = torch.rand_like(p_mask, dtype=torch.float) < p_mask
-        noisy_input = torch.where(masked_indices, self.mask_id, input_ids)
-        return noisy_input, masked_indices, p_mask
 
     # forward for concatenated inputs
     # def concatenated_forward(self, model, chosen_ids, c_mask, reject_ids, r_mask, prompt_id_lens):

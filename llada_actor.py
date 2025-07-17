@@ -136,6 +136,7 @@ class LLadaActor(nn.Module):
         sequences: torch.LongTensor,
         action_mask: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        shared_mask: Optional[torch.Tensor] = None,
         return_output=False,
         return_logprobs=False,
         mode: Literal["monte_carlo", "loss", "fall_through"] = "loss",
@@ -147,13 +148,15 @@ class LLadaActor(nn.Module):
             output = self.monte_carlo_forward(sequences, attention_mask)
             return output if not return_output else (output, {"logits": None})  # logits not used in MC
         elif mode == "fall_through":
-            return self.model(sequences, attention_mask)
+            return self.model(sequences, attention_mask, shared_mask=shared_mask)
         else:
             """
             Really not sure here what correspond to the original autoregressive terms. Just returning some analogous
             to try to not break the interace.
             """
-            l_pi, logits = self.calc_loss(sequences, attention_mask, t=torch.rand(1).item())
+            t = torch.rand(1).item()
+            noisy_input, masked, p_mask = self.forward_process(sequences, t)
+            l_pi, logits = self.calc_loss(sequences, attention_mask, noisy_input, masked, t=t)
             if return_entropy:
                 assert return_output
                 entropy = compute_entropy(l_pi)
@@ -185,33 +188,41 @@ class LLadaActor(nn.Module):
         l_pi = masked_log_probs.sum(dim=1) / (t + 1e-8)  # [B]
         return l_pi
     
-    def monte_carlo_forward(self, input_ids, input_mask, n_t=8, n_yt=1, eps=1e-6):
+    def monte_carlo_forward(self, input_ids, input_mask, shared_mask=None, n_t=8, n_yt=1, eps=0.1):
         """
         Compute the ELBO estimator with double monte carlo
         """
         b = input_ids.size(0)
         total_loss = torch.zeros(b, device=input_ids.device)
-        count = 0
-
-        for _ in range(n_t):
-            t = (1 - eps) * torch.rand(1).item() + eps
-            for _ in range(n_yt):
-                l_pi, _ = self.calc_loss(input_ids,input_mask, t)
+        if shared_mask is None:
+            count = 0
+            shared_mask = []
+            for _ in range(n_t):
+                t = (1 - eps) * torch.rand(1).item() + eps 
+                for _ in range(n_yt):
+                    noisy_input, masked, p_mask = self.forward_process(input_ids, t)
+                    shared_mask.append((t, masked))
+                    l_pi, _ = self.calc_loss(input_ids,input_mask, noisy_input, masked, t)
+                    if l_pi is not None:
+                        total_loss += l_pi  # loss is shape (B,)
+                        count += 1
+            if count == 0:
+                return torch.zeros(b, device=input_ids.device)
+            return total_loss / count, shared_mask  # shape: (B,)
+        else:
+            for t, masked in shared_mask:
+                noisy_input = torch.where(masked, self.mask_id, input_ids)
+                l_pi, _ = self.calc_loss(input_ids, input_mask, noisy_input, masked, t)
                 if l_pi is not None:
-                    total_loss += l_pi  # loss is shape (B,)
-                    count += 1
+                    total_loss += l_pi
+            return total_loss / len(shared_mask), shared_mask  # shape: (B,)
 
-        if count == 0:
-            return torch.zeros(b, device=input_ids.device)
-        return total_loss / count  # shape: (B,)
-
-    def calc_loss(self, input_ids, attention_mask, t):
+    def calc_loss(self, input_ids, attention_mask, noisy_input, masked, t):
         """
         compute l_pi(y_t, t, y|x), the token-level per-timestep ELBO loss, from a input_ids = x||y
         """
         b, l = input_ids.shape
         if l == 0: raise Exception("length is zero.")
-        noisy_input, masked, p_mask = self.forward_process(input_ids, t)
         logits = self.model(noisy_input, attention_mask=attention_mask).logits
         l_pi = self.l_pi_from_logits(logits, input_ids, masked, t)
         return l_pi, logits
