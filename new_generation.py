@@ -42,7 +42,7 @@ def get_num_transfer_tokens(mask_index, steps):
 
 @torch.no_grad()
 def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-                              remasking='low_confidence', mask_id=126336, threshold=None):
+                              remasking='low_confidence', mask_id=126336, threshold=0.8):
     """
     Dual-cache generation: initial full-context priming of the cache, then iterative block-wise sampling
     with per-block key/value replacement.
@@ -153,7 +153,7 @@ def main():
     device = 'cuda'
     model, tokenizer = init_model(
         model_path = "/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/merged_pretrained_model/merged_model_good_base",
-        adapter_path = "/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/step-600",
+        adapter_path = "/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/new_weights/step-1400",
         load_lora = True,
         device  = "cuda"
     )

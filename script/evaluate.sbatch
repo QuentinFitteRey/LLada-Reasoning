@@ -26,11 +26,11 @@ srun accelerate launch \
   --num_processes 4 \
   --mixed_precision bf16 \
   eval_llada.py \
-    --tasks mmlu_pro_llama \
-    --limit 8 \
-    --num_fewshot 5 \
+    --tasks "mmlu,arc_challenge,hellaswag" \
+    --limit 8192 \
+    --num_fewshot 0 \
     --model llada_dist \
     --batch_size 1 \
-    --model_args 'model_path=/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/merged_pretrained_model/merged_model_good_base,adapter_path=/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/new_weights/step-1400,load_lora=True,cfg=0.0,is_check_greedy=False,mc_num=1,gen_length=2048'
+    --model_args 'model_path=/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/merged_pretrained_model/merged_model_good_base,adapter_path=/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/new_weights/step-1400,load_lora=True,cfg=0.5,is_check_greedy=False,mc_num=1,gen_length=2048'
 
 echo "Evaluation: Job $JOBID has finished!" | mail -s "SLURM Job Finished!" jmoutahir3@gatech.edu
