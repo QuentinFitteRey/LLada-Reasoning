@@ -54,7 +54,7 @@ class LLaDAEvalHarness(LM):
         cfg=0.,
         steps=1024,
         gen_length=1024,
-        block_length=64,
+        block_length=128,
         remasking='low_confidence',
         device="cuda",
         **kwargs,
@@ -80,6 +80,7 @@ class LLaDAEvalHarness(LM):
         self.model_path = model_path
         self.adapter_path = adapter_path
         self.load_lora = load_lora
+        self.task = os.environ.get("EVAL_TASKS", None)
 
         accelerator = accelerate.Accelerator()
         if accelerator.num_processes > 1:
@@ -270,40 +271,34 @@ class LLaDAEvalHarness(LM):
     def loglikelihood_rolling(self, requests):
         raise NotImplementedError
 
-    def apply_chat_template(
-        self,
-        chat_history: list[dict[str, str]],
-        use_thinking: bool = True
-    ) -> str:
-        """
-        If use_thinking is True, we prefix the user message with the
-        thinking_mode instructions; otherwise with not_thinking_mode.
-        """
+    # def apply_chat_template(
+    #     self,
+    #     chat_history: list[dict[str, str]],
+    #     use_thinking: bool = True
+    # ) -> str:
+    #     """
+    #     If use_thinking is True, we prefix the user message with the
+    #     thinking_mode instructions; otherwise with not_thinking_mode.
+    #     """
 
-        thinking_mode = """You must think step by step and provide detailed thinking on the problem before giving the final answer.
-        You must put your thinking process between <think> and </think> tags and then output the final answer with a summary of your thinking process.
-        In your thinking process, this requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop a well-considered thinking process.
-        """
-        not_thinking_mode = """You are not required to have detailed thinking on the problem between <think> and </think> tags.
-        You can provide a direct answer to the question without detailed thinking.
-        You can still take steps to solve the problem, but you do not need to provide detailed thinking on the problem.
-        """
+    #     thinking_mode = """You must think step by step and provide detailed thinking on the problem before giving the final answer.\nYou must put your thinking process between <think> and </think> tags and then output the final answer with a summary of your thinking process.\nIn your thinking process, this requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop a well-considered thinking process."""
+    #     not_thinking_mode = """You are not required to have detailed thinking on the problem between <think> and </think> tags.\nYou can provide a direct answer to the question without detailed thinking.\nYou can still take steps to solve the problem, but you do not need to provide detailed thinking on the problem."""
 
-        # grab the last user message
-        user_msg = chat_history[-1]["content"]
+    #     # grab the last user message
+    #     user_msg = chat_history[-1]["content"]
 
-        # choose the appropriate instruction prefix
-        prefix = thinking_mode if use_thinking else not_thinking_mode
+    #     # choose the appropriate instruction prefix
+    #     prefix = thinking_mode if use_thinking else not_thinking_mode
 
-        # build and return the full prompt
-        return (
-            "<BOS>"
-            "<start_id>user<end_id>\n"
-            f"{prefix}\n"
-            f"{user_msg}"
-            "<eot_id>"
-            "<start_id>assistant<end_id>\n"
-        )
+    #     # build and return the full prompt
+    #     return (
+    #         "<BOS>"
+    #         "<start_id>user<end_id>\n"
+    #         f"{prefix}\n"
+    #         f"{user_msg}"
+    #         "<eot_id>"
+    #         "<start_id>assistant<end_id>\n"
+    #     )
 
     def llada_generate_until_tokenize(self, e, idx, tokenizer):
         return {
@@ -313,6 +308,15 @@ class LLaDAEvalHarness(LM):
         }
 
     def generate_until(self, requests: list[Instance]):
+
+        thinking_mode = """You must think step by step and provide detailed thinking on the problem before giving the final answer.\nYou must put your thinking process between <think> and </think> tags and then output the final answer with a summary of your thinking process.\nIn your thinking process, this requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop a well-considered thinking process."""
+        not_thinking_mode = """You are not required to have detailed thinking on the problem between <think> and </think> tags.\nYou can provide a direct answer to the question without detailed thinking.\nYou can still take steps to solve the problem, but you do not need to provide detailed thinking on the problem."""
+        use_thinking = True
+
+        if requests:
+            self.task = getattr(requests[0], "task_name", "unknown")
+
+        print(f"[LLaDAEvalHarness] Generating with task: {self.task}")
 
         ds = [{"question": req.args[0], "until": req.args[1]['until']} for req in requests]
         ds = Dataset.from_list(ds)
@@ -326,16 +330,27 @@ class LLaDAEvalHarness(LM):
 
         out = []
         for elem in tqdm(ds, desc="Generating..."):
+
+            # 0) Concatenate the thinking mode or not thinking mode with the question_text
+            if use_thinking:
+                question_text = f"{thinking_mode}\n{elem['question_text']}"
+            else:
+                question_text = f"{not_thinking_mode}\n{elem['question_text']}"
+
             # 1) wrap the question in a chat template
-            raw = elem["question_text"]
+            raw = question_text
             chat_history = [{"role":"user","content": raw}]
-            prompt_str   = self.apply_chat_template(chat_history)
+            prompt_str = self.tokenizer.apply_chat_template(
+                chat_history,
+                tokenize=False,
+                add_generation_prompt=True
+            )
 
             # 2) tokenize
             prompt_ids = self.tokenizer(prompt_str)["input_ids"]
             prompt = torch.tensor([prompt_ids], device=self.device)
 
-            # 3) generate
+            # 3) generate with dual cache
             generated_ids, _ = generate_with_dual_cache(
                 self.model,
                 prompt,
@@ -344,6 +359,7 @@ class LLaDAEvalHarness(LM):
                 block_length=self.block_length,
                 temperature=0.0,
                 remasking="low_confidence",
+                threshold=0.8
             )
 
             # print(f"--- Debug Info for Request ---")
@@ -360,13 +376,99 @@ class LLaDAEvalHarness(LM):
             text = self.tokenizer.decode(gen_part, skip_special_tokens=False)
 
             # 5) stop‐token trimming
-            for stop_seq in elem["until"]:
-                if stop_seq in text:
-                    text = text.split(stop_seq)[0]
+            stop_token = "<|eot_id|>"
+            if stop_token in text:
+                text = text[: text.index(stop_token)]
 
             # 6) remove any stray special tokens
             final_ids = self.tokenizer(text)["input_ids"]
             clean = self.tokenizer.decode(final_ids, skip_special_tokens=True)
+
+            # print("----- PROMPT BEGIN -----", file=sys.stderr)
+            # print(prompt_str, file=sys.stderr)
+            # print("------ PROMPT END ------\n", file=sys.stderr)
+            # print("----- GENERATED BEGIN ----", file=sys.stderr)
+            # print(text, file=sys.stderr)
+            # print("------ GENERATED END -----\n", file=sys.stderr)
+            # print("----- ANSWER BEGIN ----", file=sys.stderr)
+            # print(clean, file=sys.stderr)
+            # print("------ ANSWER END -----", file=sys.stderr)
+
+            if self.task.startswith("mmlu"):
+                # --- STAGE 1: Strict / structured matches ---
+                primary_matches = re.findall(
+                    r"(?:The (?:best )?answer is\s*\\boxed\{([A-Z])\}|"        # The best answer is \boxed{B}
+                    r"\\boxed\{([A-Z])\}|"                                     # \boxed{B}
+                    r"The (?:best )?answer is\s*[\(\[]?([A-Z])[\)\]]?|"        # The best answer is B
+                    r"Answer[:\s]+([A-Z]))",                                   # Answer: B
+                    clean,
+                    re.IGNORECASE
+                )
+                flat_primary = [g for match in primary_matches for g in match if g]
+
+                if flat_primary:
+                    clean = flat_primary[-1].strip().upper()
+                    # print(f"[LLaDAEvalHarness] Cleaned answer (primary match): {clean}", file=sys.stderr)
+                else:
+                    # --- STAGE 2: Heuristic / fallback patterns ---
+                    secondary_matches = re.findall(
+                        r"(?:Option\s+([A-Z])|"                                         # Option B
+                        r"I (?:choose|pick|conclude with)\s+([A-Z])|"                   # I choose A
+                        r"The correct answer is\s*[\(\[]?([A-Z])[\)\]]?|"               # The correct answer is (B)
+                        r"Therefore, the correct answer is\s*[\(\[]?([A-Z])[\)\]]?|"    # Therefore, the correct answer is (A)
+                        r"Thus, the answer is\s*([A-Z])|"                               # Thus, the answer is B
+                        r"Hence,.*?\s([A-Z])|"                                          # Hence ... Z
+                        r"^Answer\s*[\r\n]+([A-Z])|"                                    # Answer\nB
+                        r"\*\*Answer:\s*\(([A-Z])\)\*\*|"                               # **Answer: (C)**
+                        r"\*\*Answer:\s*\(([A-Z])\)|"                                   # **Answer:** (C)
+                        r"\*\*Answer:\*\*\s*\[([A-Z])\]|"                               # **Answer:** [D]
+                        r"^([A-Z])$"                                                    # Capital letter alone on a line
+                        r")",                                                           # <-- THIS closes the outer non-capturing group
+                        clean,
+                        re.IGNORECASE | re.MULTILINE,
+                    )
+                    flat_secondary = [g for match in secondary_matches for g in match if g]
+
+                    if flat_secondary:
+                        clean = flat_secondary[-1].strip().upper()
+                        # print(f"[LLaDAEvalHarness] Cleaned answer (secondary heuristic): {clean}", file=sys.stderr)
+                    else:
+                        print(f"[Warning] No valid A-Z answer found in generated text for MMLU task:\n{clean}", file=sys.stderr)
+
+            elif self.task.startswith("gsm8k"):
+                # --- STAGE 1: Strict pattern match ---
+                match = re.search(
+                    r"(?:####\s*|"
+                    r"\\boxed\s*\{\s*|"
+                    r"\\boxed\{|\bAnswer[:\s]*|"
+                    r"The final answer is\s*\\boxed\{?|"
+                    r"The answer is\s*\\boxed\{?)"
+                    r"(-?\d{1,3}(?:,\d{3})*|\d+)(?:\s*\w+)?\}?",
+                    clean,
+                    re.IGNORECASE
+                )
+
+                if match:
+                    extracted_answer = match.group(1).replace(",", "").strip()
+                    answer_end_idx = match.end()
+                    clean = clean[:answer_end_idx].rstrip() + f"\n#### {extracted_answer}"
+
+                else:
+                    # --- STAGE 2: Heuristic fallback for implicit answers ---
+                    fallback_matches = re.findall(
+                        r"(?:\*\*)?(?:takes|is|equals|costs|spent|was|be|add up to|total(?:s)?(?: up to)?|"
+                        r"amount(?:s)? to|the answer is|answer[:\s]*|summary[:\s]*|=)(?:\*\*|:)?\s*"
+                        r"\**\$?(-?\d{1,3}(?:,\d{3})*|\d+(?:\.\d+)?)\**"
+                        r"(?:\s*(?:minutes?|seconds?|hours?|dollars?|cents?|units?|miles?|kilometers?))?",
+                        clean,
+                        re.IGNORECASE
+                    )
+
+                    if fallback_matches:
+                        extracted_answer = fallback_matches[-1].replace(",", "").strip()
+                        clean = clean.strip() + f"\n#### {extracted_answer}"
+                    else:
+                        print(f"[Warning] No numeric answer found in GSM8K output:\n{clean}", file=sys.stderr)
 
             out.append(clean)
 
@@ -374,7 +476,6 @@ class LLaDAEvalHarness(LM):
                 self.accelerator.wait_for_everyone()
 
         return out
-
 
 if __name__ == "__main__":
     set_seed(1234)
