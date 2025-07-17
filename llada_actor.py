@@ -38,6 +38,7 @@ class LLadaActor(nn.Module):
     def __init__(
         self,
         pretrain_or_model,
+        tokenizer=None,
         use_flash_attention_2=False,
         bf16=True,
         load_in_4bit=False,
@@ -53,6 +54,8 @@ class LLadaActor(nn.Module):
     ) -> None:
         super().__init__()
         self.temperature = temperature
+        if tokenizer is not None:
+            self.tokenizer = tokenizer
 
         if isinstance(pretrain_or_model, str):
             attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
@@ -126,6 +129,7 @@ class LLadaActor(nn.Module):
             self.model.config.use_cache = False
         else:
             self.model = pretrain_or_model
+            self.mask_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
 
     def forward(
         self,

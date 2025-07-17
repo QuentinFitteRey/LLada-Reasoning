@@ -10,7 +10,7 @@ mkdir -p "$OUTPUT_DIR"
 # === TRAIN CONFIG ===
 TRAIN_BATCH=16
 MICRO_BATCH=1
-ZERO_STAGE=3
+ZERO_STAGE=2
 BF16="--bf16"
 FLASH="--flash_attn"
 # GRAD_CHECK="--gradient_checkpointing"
@@ -23,7 +23,7 @@ BETA=0.1
 LORA_ARGS="\
 --lora_rank 32 \
 --lora_alpha 64 \
---lora_dropout 0.5 \
+--lora_dropout 0.1 \
 --target_modules q_proj v_proj k_proj o_proj
 "
 
@@ -45,6 +45,9 @@ deepspeed ./train_dpo.py \
     --logging_steps 1 \
     --save_steps -1 \
     --eval_steps -1 \
+    --use_wandb dc953a73754e73f853a4148bed458100f5ed36f7\
+    --wandb_project "LLada-Reasoning" \
+    --wandb_run_name "dpo_lora" \
     $BF16 \
     $FLASH \
     $GRAD_CHECK \

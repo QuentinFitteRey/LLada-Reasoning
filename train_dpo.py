@@ -25,6 +25,7 @@ def train(args):
     pretrain, tokenizer = init_model()
     model = LLadaActor(
         pretrain,
+        tokenizer=tokenizer,
         use_flash_attention_2=args.flash_attn,
         bf16=args.bf16,
         load_in_4bit=args.load_in_4bit,
@@ -33,8 +34,7 @@ def train(args):
         lora_dropout=args.lora_dropout,
         target_modules=args.target_modules,
         ds_config=strategy.get_ds_train_config(is_actor=True),
-        packing_samples=args.packing_samples,
-        use_liger_kernel=args.use_liger_kernel,
+        use_liger_kernel=args.use_liger_kernel
     )
 
     # configure tokenizer
@@ -44,11 +44,11 @@ def train(args):
     # load weights for ref model
     ref_model = LLadaActor(
         pretrain,
+        tokenizer=tokenizer,
         use_flash_attention_2=args.flash_attn,
         bf16=args.bf16,
         load_in_4bit=args.load_in_4bit,
-        ds_config=strategy.get_ds_eval_config(offload=args.ref_offload),
-        packing_samples=args.packing_samples,
+        ds_config=strategy.get_ds_eval_config(offload=args.ref_offload)
     )
     if args.ref_offload:
         ref_model._offload = True
@@ -143,10 +143,6 @@ def train(args):
         num_training_steps=max_steps,
         scheduler_specific_kwargs={"min_lr": args.learning_rate * 0.1},
     )
-    trainable_params = [p for p in model.parameters()]
-    print(f"\n\n\n\nTrainable parameters: {len(trainable_params)}\n\n\n\n")
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    print(f"\n\n\n\nTrainable parameters: {len(trainable_params)}\n\n\n\n")
     # strategy prepare
     ((model, optim, scheduler), ref_model) = strategy.prepare((model, optim, scheduler), ref_model)
 
