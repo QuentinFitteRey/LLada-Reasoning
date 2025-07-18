@@ -5,7 +5,7 @@ import torch
 from torch.optim import Optimizer
 from tqdm import tqdm
 import torch.nn.functional as F
-from openrlhf.models import DPOLoss
+from DPOLoss import DPOLoss
 from openrlhf.utils.distributed_sampler import DistributedSampler
 
 
@@ -161,12 +161,17 @@ class DPOTrainer(ABC):
                 chosen_logps, chosen_shared = self.model(chosen_ids, c_mask, mode="monte_carlo")
                 rejected_logps, rejected_shared = self.model(reject_ids, r_mask, mode="monte_carlo")
                 with torch.no_grad():
-                    reference_chosen_logps, _ = self.ref_model(chosen_ids, c_mask, shared_mask=chosen_shared, mode="monte_carlo")
-                    reference_rejected_logps, _ = self.ref_model(reject_ids, r_mask, shared_mask=rejected_shared, mode="monte_carlo")
+                    if step < 150:
+                        # use monte carlo sampling for the first 150 steps
+                        reference_chosen_logps, _ = self.ref_model(chosen_ids, c_mask, mode="monte_carlo")
+                        reference_rejected_logps, _ = self.ref_model(reject_ids, r_mask, mode="monte_carlo")
+                    else:
+                        reference_chosen_logps, _ = self.ref_model(chosen_ids, c_mask, shared_mask=chosen_shared, mode="monte_carlo")
+                        reference_rejected_logps, _ = self.ref_model(reject_ids, r_mask, shared_mask=rejected_shared, mode="monte_carlo")
 
                 # loss function
                 preference_loss, chosen_reward, reject_reward = self.loss_fn(
-                    -chosen_logps, -rejected_logps, -reference_chosen_logps, -reference_rejected_logps
+                    chosen_logps, rejected_logps, reference_chosen_logps, reference_rejected_logps
                 )
                 # mixtral
                 if not self.aux_loss:
@@ -178,7 +183,9 @@ class DPOTrainer(ABC):
                 loss = preference_loss + aux_loss * self.args.aux_loss_coef + nll_loss * self.args.nll_loss_coef
                 self.strategy.backward(loss, self.model, self.optimizer)
                 self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
-
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None:
+                        print("gradients: ", name, param.grad.abs().mean())
                 acc = (chosen_reward > reject_reward).float().mean().item()
                 acc_sum += acc
                 loss_sum += preference_loss.item()
@@ -270,7 +277,7 @@ class DPOTrainer(ABC):
                 reference_rejected_logps, _ = self.ref_model(reject_ids, r_mask, shared_mask=rejected_shared, mode="monte_carlo")
 
                 loss, chosen_reward, reject_reward = self.loss_fn(
-                    -chosen_logps, -rejected_logps, -reference_chosen_logps, -reference_rejected_logps
+                    chosen_logps, rejected_logps, reference_chosen_logps, reference_rejected_logps
                 )
                 acc_sum += (chosen_reward > reject_reward).float().mean().item()
                 loss_sum += loss.item()

@@ -145,10 +145,10 @@ class LLadaActor(nn.Module):
         """Returns action log probs"""
         batch, seqlen = sequences.size()
         if mode == "monte_carlo":
-            output = self.monte_carlo_forward(sequences, attention_mask)
+            output = self.monte_carlo_forward(sequences, attention_mask, shared_mask=shared_mask)
             return output if not return_output else (output, {"logits": None})  # logits not used in MC
         elif mode == "fall_through":
-            return self.model(sequences, attention_mask, shared_mask=shared_mask)
+            return self.model(sequences, attention_mask)
         else:
             """
             Really not sure here what correspond to the original autoregressive terms. Just returning some analogous
@@ -192,6 +192,7 @@ class LLadaActor(nn.Module):
         """
         Compute the ELBO estimator with double monte carlo
         """
+        # print("This is one run")
         b = input_ids.size(0)
         total_loss = torch.zeros(b, device=input_ids.device)
         if shared_mask is None:
@@ -206,6 +207,7 @@ class LLadaActor(nn.Module):
                     if l_pi is not None:
                         total_loss += l_pi  # loss is shape (B,)
                         count += 1
+                    # print(f"Random sampling: t:{t}; mask:{masked.sum()}; l_pi:{l_pi}")
             if count == 0:
                 return torch.zeros(b, device=input_ids.device)
             return total_loss / count, shared_mask  # shape: (B,)
@@ -215,6 +217,7 @@ class LLadaActor(nn.Module):
                 l_pi, _ = self.calc_loss(input_ids, input_mask, noisy_input, masked, t)
                 if l_pi is not None:
                     total_loss += l_pi
+                # print(f"shared mask: t:{t}; mask:{masked.sum()}; l_pi:{l_pi}")
             return total_loss / len(shared_mask), shared_mask  # shape: (B,)
 
     def calc_loss(self, input_ids, attention_mask, noisy_input, masked, t):
