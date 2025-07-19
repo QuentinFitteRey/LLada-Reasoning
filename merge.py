@@ -36,8 +36,8 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Merge LoRA weights into LLaDAModelLM")
     parser.add_argument("--model_name", type=str, default="./llada_local", help="Path to the base model")
-    parser.add_argument("--lora_weights", type=str, default="/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_pretrain_8k_clip_lr15_betterval_128_good_newdata/step-320", help="Path to the LoRA weights")
-    parser.add_argument("--output_dir", type=str, default="./merged_model", help="Directory to save the merged model")
+    parser.add_argument("--lora_weights", type=str, default="/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_pretrain_8k_clip_lr15_betterval_128_good/step-320", help="Path to the LoRA weights")
+    parser.add_argument("--output_dir", type=str, default="./merged_model_good_base", help="Directory to save the merged model")
 
     args = parser.parse_args()
     

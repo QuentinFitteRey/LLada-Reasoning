@@ -5,11 +5,11 @@ from peft import PeftModel, PeftConfig, LoraConfig, get_peft_model_state_dict, s
 
 def init_model(lora=False):
     # Path to your local directory containing the modified model
-    local_model_path = "./llada_local" 
+    local_model_path = "/home/hice1/qfitterey3/scratch/LLada-Reasoning/merged_model_good_base" 
+    local_model_tokenizer_path = "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_pretrain3/step-600"
 
-
-    print(f"Loading tokenizer from: {local_model_path}")
-    tokenizer = AutoTokenizer.from_pretrained(local_model_path)
+    print(f"Loading tokenizer from: {local_model_tokenizer_path}")
+    tokenizer = AutoTokenizer.from_pretrained(local_model_tokenizer_path, use_fast=True, local_files_only=True)
 
     print(f"Loading modified model from: {local_model_path}")
     model = AutoModelForCausalLM.from_pretrained(
@@ -23,18 +23,26 @@ def init_model(lora=False):
         local_files_only=True,  # Ensure it loads from local files only
     )
     print("Model loaded successfully with local modifications.")
+    # special_tokens_to_add = {
+    # "additional_special_tokens": ["<|mdm_mask|>", "<think>", "</think>"]
+    # }
+
+    # if tokenizer.pad_token is None:
+    #     special_tokens_to_add["pad_token"] = "<|pad|>"
+
+    # # Add tokens to tokenizer
+    # tokenizer.add_special_tokens(special_tokens_to_add)
+
+    # # Resize embeddings of the entire PeftModel
+    model.resize_token_embeddings(len(tokenizer))
+    print(len(tokenizer))
 
     if lora:
-        print("Loading LoRA configuration...")
-        lora_config = LoraConfig(
-            r=32,
-            lora_alpha=64,
-            lora_dropout=0.5,
-            bias="none",
-            task_type="CAUSAL_LM",
-            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"]  
+        lora_config = PeftConfig.from_pretrained(
+            "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_pretrain3/step-600/sft_adapter"
         )
-        model = PeftModel.from_pretrained(model, "/storage/home/hcoda1/0/jmoutahir3/scratch/LLaDA_checkpoints/test_checkpoint", lora_config=lora_config)
+        print("Loading LoRA configuration...")
+        model = PeftModel.from_pretrained(model, "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_pretrain3/step-600/sft_adapter", lora_config=lora_config)
         print("LoRA model loaded successfully.")
     return model, tokenizer
 

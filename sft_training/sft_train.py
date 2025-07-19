@@ -32,11 +32,26 @@ class SFTDataset(Dataset):
     def __len__(self): return len(self.dataset)
     def __getitem__(self, idx):
         ex = self.dataset[idx]
-        user_ids = self.tokenizer.encode(ex['user'] + self.tokenizer.eos_token, add_special_tokens=False)
-        asm_ids = self.tokenizer.encode(ex['assistant'] + self.tokenizer.eos_token, add_special_tokens=False)
-        prompt_length = len(user_ids)
-        input_ids = (user_ids + asm_ids)[:self.max_length]
-        return {"input_ids": torch.tensor(input_ids, dtype=torch.long), "prompt_length": prompt_length}
+
+        user_message = {"role": "user", "content": ex['user']}
+        assistant_message = {"role": "assistant", "content": ex['assistant']}
+        prompt_ids = self.tokenizer.apply_chat_template(
+            [user_message],
+            tokenize=True,
+            add_generation_prompt=True
+        )
+        prompt_length = len(prompt_ids)
+
+        input_ids = self.tokenizer.apply_chat_template(
+            [user_message, assistant_message],
+            tokenize=True,
+            add_generation_prompt=False
+        )[:self.max_length]
+
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "prompt_length": prompt_length,
+        }
 
 class SFTDataCollator:
     def __init__(self, tokenizer): self.pad_id = tokenizer.pad_token_id
@@ -101,14 +116,14 @@ def run_validation(model, loader, dev, mask_id, pad_id, limit=None, mc_runs=1):
 def main():
     parser = argparse.ArgumentParser(description='SFT for LLaDA with Multi-Stage LoRA')
     # Model and Data Paths
-    parser.add_argument('--pretrained-model', type=str, default="./merged_model", help="Path to the base Hugging Face model.")
+    parser.add_argument('--pretrained-model', type=str, default="./merged_model_good_base", help="Path to the base Hugging Face model.")
     parser.add_argument('--sft-data', type=str, default='./sft_data/combined', help='Path to SFT DatasetDict.')
-    parser.add_argument('--output-dir', type=str, default='./checkpoints/llada_sft_first_from_pretrain_alldata', help='Directory to save checkpoints and logs.')
+    parser.add_argument('--output-dir', type=str, default='./checkpoints/checkpoints_llada_sft_first_from_pretrain_alldata_good', help='Directory to save checkpoints and logs.')
     parser.add_argument('--pretraining-lora-weights', type=str, default=None, help="Optional: Path to non-trainable LoRA weights from pre-training stage.")
-    parser.add_argument('--sft-lora-weights', type=str, default=None, help="Optional: Path to trainable LoRA weights from a previous SFT run to continue training.")
-    parser.add_argument('--resume-from-checkpoint', type=str, default=None, help="Path to resume trainer state (optimizer, scheduler, step).")
+    parser.add_argument('--sft-lora-weights', type=str, default="/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_sft_first_from_pretrain_alldata_good/step-900", help="Optional: Path to trainable LoRA weights from a previous SFT run to continue training.")
+    parser.add_argument('--resume-from-checkpoint', type=str, default="/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_sft_first_from_pretrain_alldata_good/step-900", help="Path to resume trainer state (optimizer, scheduler, step).")
     # LoRA options (for creating a new adapter)
-    parser.add_argument('--lora-r', type=int, default=128) 
+    parser.add_argument('--lora-r', type=int, default=128)
     parser.add_argument('--lora-alpha', type=int, default=256)
     parser.add_argument('--lora-dropout', type=float, default=0.05)
     parser.add_argument('--lora-target-modules', nargs='+', default=['q_proj', 'v_proj', 'k_proj', 'o_proj'])
@@ -129,6 +144,8 @@ def main():
     parser.add_argument('--val-limit-batches', type=int, default=75)
     parser.add_argument('--use-wandb', action='store_true', default=True)
     parser.add_argument('--wandb-project', type=str, default='llada-sft')
+    # --- NEW: W&B Run ID Argument ---
+    parser.add_argument('--wandb-run-id', type=str, default=None, help="W&B run ID to resume logging.")
     args = parser.parse_args()
 
     setup_ddp()
@@ -136,33 +153,83 @@ def main():
     world_size = dist.get_world_size()
     device = torch.device(f"cuda:{os.environ['LOCAL_RANK']}")
     is_main = rank == 0
+    
+    # --- MODIFIED: W&B and State Resuming Logic ---
+    wandb_run_id = args.wandb_run_id
+    start_epoch, global_step = 0, 0
+    
+    # Load trainer state first to get W&B run ID if it exists
+    if args.resume_from_checkpoint:
+        state_path = os.path.join(args.resume_from_checkpoint, "trainer_state.pt")
+        if os.path.exists(state_path):
+            if is_main: print(f"Loading trainer state from {state_path}")
+            state = torch.load(state_path, map_location='cpu')
+            # If a run ID was saved in the checkpoint, use it
+            if not wandb_run_id: # Only use from checkpoint if not manually specified
+                wandb_run_id = state.get("wandb_run_id")
+        else:
+            state = None # To avoid errors later if file doesn't exist
+    else:
+        state = None
 
     # W&B Setup
-    if is_main and args.use_wandb: wandb.init(project=args.wandb_project, config=vars(args))
+    if is_main and args.use_wandb:
+        if wandb_run_id:
+            # Resuming an existing run
+            wandb.init(project=args.wandb_project, id=wandb_run_id, resume="must")
+        else:
+            # Starting a new run
+            wandb_run_id = wandb.util.generate_id()
+            wandb.init(project=args.wandb_project, id=wandb_run_id, config=vars(args))
 
-    # --- Layered Model & LoRA Loading Logic ---
+    # Layered Model & LoRA Loading Logic
     dtype = getattr(torch, args.torch_dtype)
-    print(dtype)
     if is_main: print(f"Loading base model: {args.pretrained_model}")
-    model = LLaDAModelLM.from_pretrained(args.pretrained_model, trust_remote_code=True, torch_dtype=torch.bfloat16)
-
-    if args.pretraining_lora_weights:
-        if is_main: print(f"Applying non-trainable pre-training LoRA from: {args.pretraining_lora_weights}")
-        model = PeftModel.from_pretrained(model, args.pretraining_lora_weights, is_trainable=False)
+    model = LLaDAModelLM.from_pretrained(
+        args.pretrained_model,
+        trust_remote_code=True,
+        torch_dtype=dtype
+    )
 
     if args.sft_lora_weights:
-        if is_main: print(f"Loading trainable SFT LoRA from: {args.sft_lora_weights}")
-        model.add_adapter(LoraConfig(r=args.lora_r, lora_alpha=args.lora_alpha, target_modules=args.lora_target_modules, lora_dropout=args.lora_dropout, bias='none'), adapter_name="sft_adapter")
-        model.load_adapter(args.sft_lora_weights, adapter_name="sft_adapter")
-        model.set_adapter("sft_adapter")
+        # RESUME SFT TRAINING PATH
+        if is_main: print(f"Resuming SFT training from checkpoint: {args.sft_lora_weights}")
+        model = PeftModel.from_pretrained(
+            model,
+            args.sft_lora_weights,
+            local_files_only=True
+        )
+        # Try to set adapter to 'default', as old checkpoints might use this name
+        try:
+            model.set_adapter("default")
+            if is_main: print("Successfully loaded adapter 'default'.")
+        except ValueError:
+            model.set_adapter("sft_adapter")
+            if is_main: print("Successfully loaded adapter 'sft_adapter'.")
+
+
     else:
-        if is_main: print("Creating new trainable SFT LoRA adapter.")
-        lora_config = LoraConfig(r=args.lora_r, lora_alpha=args.lora_alpha, target_modules=args.lora_target_modules, lora_dropout=args.lora_dropout, bias='none', task_type='CAUSAL_LM')
-        model = get_peft_model(model, lora_config)
+        # START NEW SFT TRAINING PATH
+        if is_main: print("Starting a new SFT training run.")
+        sft_lora_config = LoraConfig(
+            r=args.lora_r, lora_alpha=args.lora_alpha, target_modules=args.lora_target_modules,
+            lora_dropout=args.lora_dropout, bias='none', task_type='CAUSAL_LM'
+        )
+        if args.pretraining_lora_weights:
+            if is_main: print(f"Applying non-trainable base LoRA from: {args.pretraining_lora_weights}")
+            model = PeftModel.from_pretrained(
+                model, args.pretraining_lora_weights, adapter_name="pretrained_lora", is_trainable=False
+            )
+            model.add_adapter(sft_lora_config, adapter_name="sft_adapter")
+            if is_main: print("Added new trainable 'sft_adapter'.")
+        else:
+            model = get_peft_model(model, sft_lora_config, adapter_name="sft_adapter")
+            if is_main: print("Created new trainable 'sft_adapter'.")
+        model.set_adapter("sft_adapter")
 
     if is_main: print_trainable_parameters(model)
-    
-    model.to(device) 
+    model.to(device)
+
     # Tokenizer and other setup
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model, use_fast=True)
     special_tokens = {}
@@ -180,20 +247,18 @@ def main():
     model = DDP(model, device_ids=[int(os.environ["LOCAL_RANK"])])
 
     # Data Loading
-    ds = load_from_disk("./sft_data/combined/")
+    ds = load_from_disk(args.sft_data)
     train_keys = [k for k in ds.keys() if k.endswith("_train")]
     val_keys = [k for k in ds.keys() if k.endswith("_validation")]
     limited_train_datasets, train_sizes = [], []
     limited_val_datasets, val_sizes = [], []
     TRAIN_LIMIT, VAL_LIMIT = 50000, 2500
-
     if is_main: print("=== TRAINING DATASETS (Limited) ===")
     for key in train_keys:
         original_size, limited_size = len(ds[key]), min(len(ds[key]), TRAIN_LIMIT)
         limited_train_datasets.append(ds[key].select(range(limited_size)))
         train_sizes.append(limited_size)
         if is_main: print(f"{key}: {original_size:,} -> {limited_size:,} samples")
-
     if is_main: print("\n=== VALIDATION DATASETS (Limited) ===")
     for key in val_keys:
         original_size, limited_size = len(ds[key]), min(len(ds[key]), VAL_LIMIT)
@@ -204,7 +269,6 @@ def main():
     total_working, total_working_val = sum(train_sizes), sum(val_sizes)
     train_probs = [s / total_working for s in train_sizes] if total_working > 0 else []
     val_probs = [s / total_working_val for s in val_sizes] if total_working_val > 0 else []
-    
     train_ds = SFTDataset(interleave_datasets(limited_train_datasets, probabilities=train_probs, seed=42), tokenizer, args.seq_len)
     val_ds = SFTDataset(interleave_datasets(limited_val_datasets, probabilities=val_probs, seed=42), tokenizer, args.seq_len)
     collator = SFTDataCollator(tokenizer)
@@ -213,7 +277,7 @@ def main():
     val_sampler = DistributedSampler(val_ds, rank=rank, num_replicas=world_size, shuffle=False)
     val_loader = DataLoader(val_ds, batch_size=args.local_batch, sampler=val_sampler, collate_fn=collator)
 
-    # Optimizer, Scheduler, and Trainer State Resuming
+    # Optimizer, Scheduler, and final State Resuming
     optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
     accum_steps = args.batch_size // (args.local_batch * world_size)
     total_steps = (len(train_loader) // accum_steps) * args.epochs
@@ -223,25 +287,26 @@ def main():
         return max(args.min_lr_ratio, 0.5 * (1.0 + math.cos(math.pi * p)))
     scheduler = LambdaLR(optimizer, lr_fn)
     
-    start_epoch, global_step = 0, 0
-    if args.resume_from_checkpoint:
-        state_path = os.path.join(args.resume_from_checkpoint, "trainer_state.pt")
-        if os.path.exists(state_path):
-            if is_main: print(f"Resuming trainer state from {state_path}")
-            state = torch.load(state_path, map_location=device)
-            optimizer.load_state_dict(state["optimizer"]); scheduler.load_state_dict(state["scheduler"])
-            global_step, start_epoch = state["global_step"], state["epoch"]
-            torch.set_rng_state(state["rng_state_cpu"].to("cpu")); torch.cuda.set_rng_state(state["rng_state_gpu"].to(device))
+    if state:
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        for opt_state in optimizer.state.values():
+            for k, v in opt_state.items():
+                if isinstance(v, torch.Tensor):
+                    opt_state[k] = v.to(device)
+        global_step = state["global_step"]
+        start_epoch = state["epoch"]
+        torch.set_rng_state(state["rng_state_cpu"])
+        torch.cuda.set_rng_state(state["rng_state_gpu"], device=device)
     
-    # ✨ NEW: Initial Validation Step
+    # Initial Validation Step
     dist.barrier()
-    if global_step == 0: # Only run validation if not resuming from a checkpoint
+    if global_step == 0:
         if is_main: print("\nRunning initial validation before training...")
         initial_val_loss = run_validation(model, val_loader, device, mask_id, pad_id, limit=args.val_limit_batches)
         if is_main:
             print(f"Initial Validation Loss: {initial_val_loss:.4f}")
-            if args.use_wandb:
-                wandb.log({"validation/initial_loss": initial_val_loss, "step": 0})
+            if args.use_wandb: wandb.log({"validation/loss": initial_val_loss, "step": 0})
     dist.barrier()
 
     # Training Loop
@@ -277,7 +342,16 @@ def main():
                         os.makedirs(ckpt_dir, exist_ok=True)
                         model.module.save_pretrained(ckpt_dir)
                         tokenizer.save_pretrained(ckpt_dir)
-                        state = {"optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "global_step": global_step, "epoch": epoch, "rng_state_cpu": torch.get_rng_state(), "rng_state_gpu": torch.cuda.get_rng_state()}
+                        # --- MODIFIED: Add wandb_run_id to saved state ---
+                        state = {
+                            "optimizer": optimizer.state_dict(), 
+                            "scheduler": scheduler.state_dict(), 
+                            "global_step": global_step, 
+                            "epoch": epoch, 
+                            "rng_state_cpu": torch.get_rng_state(), 
+                            "rng_state_gpu": torch.cuda.get_rng_state(),
+                            "wandb_run_id": wandb_run_id
+                        }
                         torch.save(state, os.path.join(ckpt_dir, "trainer_state.pt"))
                         print(f"  Checkpoint saved: {ckpt_dir}")
                     dist.barrier()

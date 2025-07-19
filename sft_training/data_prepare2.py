@@ -11,12 +11,13 @@ DATASETS = [
 #     "bespokelabs/Bespoke-Stratos-17k",
 #     "open-thoughts/OpenThoughts-114k",
 #     "databricks/databricks-dolly-15k",
-    "Open-Orca/SlimOrca",
+#    "Open-Orca/SlimOrca",
 ]
 AVG_CHARS_PER_TOKEN = 4
 
 def to_conversation(example, ds_id):
     if ds_id.startswith("nvidia/Llama-Nemotron"):
+        # lets add a
         user = " ".join(msg.get("content", "") for msg in example.get("input", []))
         return {"user": user, "assistant": example.get("output", "")}
 
@@ -135,10 +136,10 @@ def main():
     parser = argparse.ArgumentParser("SFT Data Prep (no caching)")
     parser.add_argument("--model_name",   type=str, default="./llada_local_instruct")
     parser.add_argument("--max_length",   type=int, default=8192)
-    parser.add_argument("--max_examples", type=int, default=500000)
+    parser.add_argument("--max_examples", type=int, default=5000000)
     parser.add_argument("--num_proc",     type=int, default=24)
     parser.add_argument("--batch_size",   type=int, default=1000)
-    parser.add_argument("--out",          type=str, default="./sft_data_orca")
+    parser.add_argument("--out",          type=str, default="./sft_new_llama")
     parser.add_argument("--debug",        action="store_true",
                         help="cap each split to 500 examples for quick testing")
     args = parser.parse_args()
