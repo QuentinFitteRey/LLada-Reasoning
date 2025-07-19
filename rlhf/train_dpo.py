@@ -1,29 +1,43 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import argparse
 import math
-import os
 from datetime import datetime
 
 from transformers.trainer import get_scheduler
 from init_model import init_model
-from llada_actor import LLadaActor
+from rlhf.actor import Actor
 
 from openrlhf.datasets import RewardDataset
 from openrlhf.datasets.utils import blending_datasets
-from dpo_trainer import DPOTrainer
-from openrlhf.utils import get_strategy, get_tokenizer
+from rlhf.dpo_trainer import DPOTrainer
+from rlhf.deepspeedStrategy import DeepspeedStrategy
 
-import os
 os.environ["MASTER_PORT"] = "42000"
 
 def train(args):
     # configure strategy
+    def get_strategy(args):
+        strategy = DeepspeedStrategy(
+            seed=getattr(args, "seed", 42),
+            full_determinism=getattr(args, "full_determinism", False),
+            max_norm=getattr(args, "max_norm", 1.0),
+            micro_train_batch_size=getattr(args, "micro_train_batch_size", 1),
+            train_batch_size=getattr(args, "train_batch_size", 128),
+            zero_stage=args.zero_stage,
+            bf16=getattr(args, "bf16", True),
+            args=args,
+        )
+        return strategy
     strategy = get_strategy(args)
     strategy.setup_distributed()
 
     # configure model
     # load huggingface model
     pretrain, tokenizer = init_model()
-    model = LLadaActor(
+    model = Actor(
         pretrain,
         tokenizer=tokenizer,
         use_flash_attention_2=args.flash_attn,
@@ -42,7 +56,7 @@ def train(args):
     strategy.print(model)
 
     # load weights for ref model
-    ref_model = LLadaActor(
+    ref_model = Actor(
         pretrain,
         tokenizer=tokenizer,
         use_flash_attention_2=args.flash_attn,
@@ -55,6 +69,7 @@ def train(args):
 
     # gradient_checkpointing
     if args.gradient_checkpointing:
+        strategy.print("\n\n\n\nEnable gradient checkpointing\n\n\n\n")
         model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
         )

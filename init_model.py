@@ -30,16 +30,12 @@ def init_model(lora=False):
     lora_config = LoraConfig(
             r=32,
             lora_alpha=64,
-            lora_dropout=0.5,
+            lora_dropout=0.1,
             bias="none",
             task_type="CAUSAL_LM",
             target_modules=["q_proj", "v_proj", "k_proj", "o_proj"]  
         )
     model = get_peft_model(model, lora_config)
-    trainable = [(n, p.shape) for n, p in model.named_parameters() if p.requires_grad]
-    print(f"Num trainable: {len(trainable)}")
-    for n, s in trainable:
-        print(f"  {n}: {s}")
     if lora:
         print("Loading LoRA configuration...")
         model = PeftModel.from_pretrained(model, adapter_path, lora_config=lora_config)

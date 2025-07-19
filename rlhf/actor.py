@@ -12,8 +12,7 @@ import torch.nn.functional as F
 from openrlhf.models.ring_attn_utils import gather_and_pad_tensor, unpad_and_slice_tensor
 from openrlhf.models.utils import compute_entropy
 
-
-class LLadaActor(nn.Module):
+class Actor(nn.Module):
     """
     Base class for Actor models in reinforcement learning.
 
@@ -56,80 +55,8 @@ class LLadaActor(nn.Module):
         self.temperature = temperature
         if tokenizer is not None:
             self.tokenizer = tokenizer
-
-        if isinstance(pretrain_or_model, str):
-            attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
-
-            # Note: dschf is defined in function scope to avoid global effects
-            # https://huggingface.co/docs/transformers/deepspeed#non-trainer-deepspeed-integration
-            if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
-                dschf = HfDeepSpeedConfig(ds_config)
-            else:
-                dschf = None
-
-            if load_in_4bit:
-                assert bf16, "we only support bnb_4bit_compute_dtype = bf16"
-                nf4_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_use_double_quant=True,
-                    bnb_4bit_compute_dtype=torch.bfloat16,
-                )
-            else:
-                nf4_config = None
-
-            if use_liger_kernel:
-                from liger_kernel.transformers import AutoLigerKernelForCausalLM
-
-                model_class = AutoLigerKernelForCausalLM
-            else:
-                model_class = AutoModelForCausalLM
-
-            self.model = model_class.from_pretrained(
-                pretrain_or_model,
-                trust_remote_code=True,
-                attn_implementation=attn_implementation,
-                quantization_config=nf4_config,
-                torch_dtype=torch.bfloat16 if bf16 else "auto",
-                device_map=device_map,
-            )
-
-            # LoRA
-            if lora_rank > 0:
-                # https://github.com/huggingface/peft/issues/137
-                self.model.enable_input_require_grads()
-                lora_config = LoraConfig(
-                    task_type=TaskType.CAUSAL_LM,
-                    r=lora_rank,
-                    lora_alpha=lora_alpha,
-                    target_modules=target_modules,
-                    lora_dropout=lora_dropout,
-                    bias="none",
-                )
-                self.model = get_peft_model(self.model, lora_config)
-
-                if load_in_4bit:
-                    for name, module in self.model.named_modules():
-                        if isinstance(module, LoraLayer):
-                            module = module.to(torch.bfloat16)
-                        if "norm" in name:
-                            module = module.to(torch.float32)
-                        if "lm_head" in name or "embed_tokens" in name:
-                            if hasattr(module, "weight"):
-                                module = module.to(torch.bfloat16)
-
-            # MoE - balancing loss
-            model_config = self.model.config.to_dict()
-            if "output_router_logits" in model_config:
-                print("[MoE] set output_router_logits as True")
-                self.model.config.output_router_logits = True
-
-            # https://github.com/huggingface/transformers/issues/26877
-            # Use `model.generate(use_cache=True)` instead.`
-            self.model.config.use_cache = False
-        else:
-            self.model = pretrain_or_model
-            self.mask_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
+        self.model = pretrain_or_model
+        self.mask_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
 
     def forward(
         self,
@@ -139,44 +66,16 @@ class LLadaActor(nn.Module):
         shared_mask: Optional[torch.Tensor] = None,
         return_output=False,
         return_logprobs=False,
-        mode: Literal["monte_carlo", "loss", "fall_through"] = "loss",
+        mode: Literal["monte_carlo", "fall_through"] = "monte_carlo",
         return_entropy=False,
     ) -> torch.Tensor:
         """Returns action log probs"""
         batch, seqlen = sequences.size()
         if mode == "monte_carlo":
             output = self.monte_carlo_forward(sequences, attention_mask, shared_mask=shared_mask)
-            return output if not return_output else (output, {"logits": None})  # logits not used in MC
+            return output
         elif mode == "fall_through":
             return self.model(sequences, attention_mask)
-        else:
-            """
-            Really not sure here what correspond to the original autoregressive terms. Just returning some analogous
-            to try to not break the interace.
-            """
-            t = torch.rand(1).item()
-            noisy_input, masked, p_mask = self.forward_process(sequences, t)
-            l_pi, logits = self.calc_loss(sequences, attention_mask, noisy_input, masked, t=t)
-            if return_entropy:
-                assert return_output
-                entropy = compute_entropy(l_pi)
-                return (entropy[:, :-1], {"logits": l_pi})  # optional
-            
-            return_action_log_probs = action_mask is not None 
-            if not return_action_log_probs and not return_logprobs:
-                assert return_output
-                return {"logits": l_pi}
-
-            log_probs = F.log_softmax(logits / self.temperature, dim=-1)
-
-            if return_logprobs and not return_action_log_probs:
-                return (log_probs, {"logits": logits}) if return_output else log_probs
-
-            # You are using a masked token loss format, so use mask * log p_theta
-            log_p_at_labels = log_probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)  # [B, T]
-            action_log_probs = log_p_at_labels * action_mask.float()  # [B, T]
-
-            return (action_log_probs, {"logits": logits}) if return_output else action_log_probs
     
     def l_pi_from_logits(self, logits, labels, mask, t: float = 1.0) -> torch.Tensor:
         """

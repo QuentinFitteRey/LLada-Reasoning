@@ -5,7 +5,7 @@ import torch
 from torch.optim import Optimizer
 from tqdm import tqdm
 import torch.nn.functional as F
-from DPOLoss import DPOLoss
+from openrlhf.models.loss import DPOLoss
 from openrlhf.utils.distributed_sampler import DistributedSampler
 
 
@@ -147,8 +147,16 @@ class DPOTrainer(ABC):
                 disable=not self.strategy.is_rank_0(),
             )
 
-            self.model.train()
+            def deep_train(m):
+                m.train()
+                for child in m.children():
+                    deep_train(child)
+            deep_train(self.model)
+            # self.model.train()
             self.ref_model.eval()
+            # for name, module in self.model.named_modules():
+            #     if 'lora' in name or isinstance(module, torch.nn.Dropout):
+            #         print(f"{name}: training={module.training}")
             # train
             for data in self.train_dataloader:
                 chosen_ids, c_mask, reject_ids, r_mask, prompt_id_lens = data
@@ -170,35 +178,26 @@ class DPOTrainer(ABC):
                         reference_rejected_logps, _ = self.ref_model(reject_ids, r_mask, shared_mask=rejected_shared, mode="monte_carlo")
 
                 # loss function
-                preference_loss, chosen_reward, reject_reward = self.loss_fn(
+                loss, chosen_reward, reject_reward = self.loss_fn(
                     chosen_logps, rejected_logps, reference_chosen_logps, reference_rejected_logps
                 )
-                # mixtral
-                if not self.aux_loss:
-                    aux_loss = 0
-                # nll loss
-                if not self.nll_loss:
-                    nll_loss = 0
-
-                loss = preference_loss + aux_loss * self.args.aux_loss_coef + nll_loss * self.args.nll_loss_coef
                 self.strategy.backward(loss, self.model, self.optimizer)
                 self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
-                for name, param in self.model.named_parameters():
+                for name, param in self.model.model.named_parameters():
                     if param.grad is not None:
                         print("gradients: ", name, param.grad.abs().mean())
                 acc = (chosen_reward > reject_reward).float().mean().item()
                 acc_sum += acc
-                loss_sum += preference_loss.item()
+                loss_sum += loss.item()
                 # dpo logs
                 logs_dict = {
-                    "loss": preference_loss.item(),
+                    "loss": loss.item(),
                     "acc": acc,
                     "chosen_reward": chosen_reward.mean().item(),
                     "reject_reward": reject_reward.mean().item(),
                     "lr": self.scheduler.get_last_lr()[0],
                 }
-                if self.nll_loss:
-                    logs_dict["nll_loss"] = nll_loss.item()
+
                 # step bar
                 logs_dict = self.strategy.all_reduce(logs_dict)
                 step_bar.set_postfix(logs_dict)
@@ -299,65 +298,6 @@ class DPOTrainer(ABC):
                     for k, v in logs.items():
                         self._tensorboard.add_scalar(f"eval/{k}", v, steps)
         self.model.train()  # reset model state
-
-    # forward for concatenated inputs
-    # def concatenated_forward(self, model, chosen_ids, c_mask, reject_ids, r_mask, prompt_id_lens):
-    #     """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
-
-    #     We do this to avoid doing two forward passes, because it's faster for FSDP.
-    #     """
-    #     # input_ids, att_masks, prompt_id_lens = self.concatenated_inputs(
-    #     #     chosen_ids, c_mask, reject_ids, r_mask, prompt_id_lens
-    #     # )
-
-    #     log_probs, output = model(
-    #         input_ids,
-    #         attention_mask=att_masks,
-    #         return_output=True,
-    #         return_logprobs=True,
-    #         ring_attn_group=self.strategy.ring_attn_group,
-    #     )
-
-    #     all_logps_sum, all_logps_mean = self._get_batch_logps(
-    #         log_probs, att_masks, prompt_id_lens, average_log_prob=False
-    #     )
-    #     chosen_logps = all_logps_sum[: chosen_ids.shape[0]]
-    #     rejected_logps = all_logps_sum[chosen_ids.shape[0] :]
-    #     aux_loss = output.aux_loss if "aux_loss" in output else []
-    #     return chosen_logps, rejected_logps, aux_loss, -all_logps_mean[: chosen_ids.shape[0]].mean()
-
-    # optimization to reduce num of model runs
-    # def concatenated_inputs(self, chosen_ids, c_mask, reject_ids, r_mask, prompt_id_lens):
-    #     """Concatenate the chosen and rejected inputs into a single tensor.
-
-    #     Args:
-    #         batch: A batch of data. Must contain the keys 'chosen_input_ids' and 'rejected_input_ids', which are tensors of shape (batch_size, sequence_length).
-
-    #     Returns:
-    #         A dictionary containing the concatenated inputs under the key 'concatenated_input_ids'.
-    #     """
-
-    #     def pad_to_length(tensor, length, pad_value, dim=-1):
-    #         if tensor.size(dim) >= length:
-    #             return tensor
-    #         else:
-    #             pad_size = list(tensor.shape)
-    #             pad_size[dim] = length - tensor.size(dim)
-    #             return torch.cat(
-    #                 [tensor, pad_value * torch.ones(*pad_size, dtype=tensor.dtype, device=tensor.device)], dim=dim
-    #             )
-
-    #     max_length = max(chosen_ids.shape[1], reject_ids.shape[1])
-    #     inputs_ids = torch.cat(
-    #         (
-    #             pad_to_length(chosen_ids, max_length, self.tokenizer.pad_token_id),
-    #             pad_to_length(reject_ids, max_length, self.tokenizer.pad_token_id),
-    #         ),
-    #         dim=0,
-    #     )
-    #     max_length = max(c_mask.shape[1], r_mask.shape[1])
-    #     att_masks = torch.cat((pad_to_length(c_mask, max_length, 0), pad_to_length(r_mask, max_length, 0)), dim=0)
-    #     return inputs_ids, att_masks, prompt_id_lens * 2
 
     def _get_batch_logps(
         self,

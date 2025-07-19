@@ -13,7 +13,6 @@ MICRO_BATCH=1
 ZERO_STAGE=2
 BF16="--bf16"
 FLASH="--flash_attn"
-# GRAD_CHECK="--gradient_checkpointing"
 MAX_LEN=4096
 EPOCHS=1
 LR=5e-7
@@ -30,7 +29,7 @@ LORA_ARGS="\
 export DS_MASTER_PORT=42000
 
 # === RUN ===
-deepspeed ./train_dpo.py \
+deepspeed rlhf/train_dpo.py \
     --pretrain "$BASE_MODEL_PATH" \
     --dataset stanfordnlp/SHP \
     --dataset_probs 1.0 \
