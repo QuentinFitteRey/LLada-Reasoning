@@ -150,6 +150,7 @@ class DeepspeedStrategy(ABC):
         for name, param in model.named_parameters():
             if 'lora' in name:
                 print(f"{name} requires_grad = {param.requires_grad}, grad = {param.grad}")
+            break
 
     def optimizer_step(
         self,

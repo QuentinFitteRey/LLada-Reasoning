@@ -210,6 +210,7 @@ class ModelConfig():
     """
     If ``True``, use ``FlashAttention``.
     """
+    flash_attention_version: str = "flash_attn_2"
 
     attention_dropout: float = 0.1
     """

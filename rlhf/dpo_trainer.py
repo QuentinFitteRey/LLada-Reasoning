@@ -147,11 +147,12 @@ class DPOTrainer(ABC):
                 disable=not self.strategy.is_rank_0(),
             )
 
-            def deep_train(m):
-                m.train()
-                for child in m.children():
-                    deep_train(child)
-            deep_train(self.model)
+            # def deep_train(m):
+            #     m.train()
+            #     for child in m.children():
+            #         deep_train(child)
+            # deep_train(self.model)
+            self.model.train()
             # self.model.train()
             self.ref_model.eval()
             # for name, module in self.model.named_modules():
@@ -169,23 +170,20 @@ class DPOTrainer(ABC):
                 chosen_logps, chosen_shared = self.model(chosen_ids, c_mask, mode="monte_carlo")
                 rejected_logps, rejected_shared = self.model(reject_ids, r_mask, mode="monte_carlo")
                 with torch.no_grad():
-                    if step < 150:
-                        # use monte carlo sampling for the first 150 steps
-                        reference_chosen_logps, _ = self.ref_model(chosen_ids, c_mask, mode="monte_carlo")
-                        reference_rejected_logps, _ = self.ref_model(reject_ids, r_mask, mode="monte_carlo")
-                    else:
-                        reference_chosen_logps, _ = self.ref_model(chosen_ids, c_mask, shared_mask=chosen_shared, mode="monte_carlo")
-                        reference_rejected_logps, _ = self.ref_model(reject_ids, r_mask, shared_mask=rejected_shared, mode="monte_carlo")
+                    reference_chosen_logps, _ = self.ref_model(chosen_ids, c_mask, shared_mask=chosen_shared, mode="monte_carlo")
+                    reference_rejected_logps, _ = self.ref_model(reject_ids, r_mask, shared_mask=rejected_shared, mode="monte_carlo")
 
                 # loss function
                 loss, chosen_reward, reject_reward = self.loss_fn(
                     chosen_logps, rejected_logps, reference_chosen_logps, reference_rejected_logps
                 )
+                self.strategy.print(f"Loss: {loss.item()}, Grad Function: {loss.grad_fn}")
                 self.strategy.backward(loss, self.model, self.optimizer)
                 self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
-                for name, param in self.model.model.named_parameters():
-                    if param.grad is not None:
-                        print("gradients: ", name, param.grad.abs().mean())
+                # for name, param in self.model.model.named_parameters():
+                #     if param.grad is not None:
+                #         print("gradients: ", name, param.grad.abs().mean())
+                #     break
                 acc = (chosen_reward > reject_reward).float().mean().item()
                 acc_sum += acc
                 loss_sum += loss.item()

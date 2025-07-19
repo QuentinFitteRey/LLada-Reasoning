@@ -104,7 +104,7 @@ class Actor(nn.Module):
                     shared_mask.append((t, masked))
                     l_pi, _ = self.calc_loss(input_ids,input_mask, noisy_input, masked, t)
                     if l_pi is not None:
-                        total_loss += l_pi  # loss is shape (B,)
+                        total_loss  = total_loss + l_pi  # loss is shape (B,)
                         count += 1
                     # print(f"Random sampling: t:{t}; mask:{masked.sum()}; l_pi:{l_pi}")
             if count == 0:
@@ -115,7 +115,7 @@ class Actor(nn.Module):
                 noisy_input = torch.where(masked, self.mask_id, input_ids)
                 l_pi, _ = self.calc_loss(input_ids, input_mask, noisy_input, masked, t)
                 if l_pi is not None:
-                    total_loss += l_pi
+                    total_loss = total_loss + l_pi
                 # print(f"shared mask: t:{t}; mask:{masked.sum()}; l_pi:{l_pi}")
             return total_loss / len(shared_mask), shared_mask  # shape: (B,)
 

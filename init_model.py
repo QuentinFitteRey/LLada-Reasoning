@@ -33,7 +33,7 @@ def init_model(lora=False):
             lora_dropout=0.1,
             bias="none",
             task_type="CAUSAL_LM",
-            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"]  
+            target_modules=["q_proj", "v_proj", "k_proj", "attn_out"],  
         )
     model = get_peft_model(model, lora_config)
     if lora:

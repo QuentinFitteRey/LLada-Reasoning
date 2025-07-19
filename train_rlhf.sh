@@ -8,14 +8,14 @@ OUTPUT_DIR="./dpo_checkpoints_lora"  # Where to save trained LoRA adapter
 mkdir -p "$OUTPUT_DIR"
 
 # === TRAIN CONFIG ===
-TRAIN_BATCH=64
+TRAIN_BATCH=16
 MICRO_BATCH=1
 ZERO_STAGE=2
 BF16="--bf16"
 FLASH="--flash_attn"
 MAX_LEN=4096
 EPOCHS=1
-LR=5e-7
+LR=5e-5
 BETA=0.2
 
 # === LORA CONFIG (match your LoRAConfig) ===
@@ -23,7 +23,7 @@ LORA_ARGS="\
 --lora_rank 32 \
 --lora_alpha 64 \
 --lora_dropout 0.1 \
---target_modules q_proj v_proj k_proj o_proj
+--target_modules q_proj v_proj k_proj attn_out
 "
 
 export DS_MASTER_PORT=42000
@@ -53,5 +53,5 @@ deepspeed rlhf/train_dpo.py \
     $BF16 \
     $FLASH \
     $GRAD_CHECK \
-    $LORA_ARGS
+    $LORA_ARGS > training_output.log 2>&1
     # --apply_chat_template \

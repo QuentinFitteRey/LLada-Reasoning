@@ -7,15 +7,36 @@ import math
 from datetime import datetime
 
 from transformers.trainer import get_scheduler
-from init_model import init_model
 from rlhf.actor import Actor
 
 from openrlhf.datasets import RewardDataset
 from openrlhf.datasets.utils import blending_datasets
 from rlhf.dpo_trainer import DPOTrainer
 from rlhf.deepspeedStrategy import DeepspeedStrategy
-
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+from peft import PeftModel, PeftConfig, LoraConfig, get_peft_model_state_dict, set_peft_model_state_dict, get_peft_model
+import os
 os.environ["MASTER_PORT"] = "42000"
+
+def init_model(args):
+    """
+    Initializes and returns the base model and tokenizer.
+    """
+    local_model_path = args.pretrain
+
+    print(f"Loading tokenizer from: {local_model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(local_model_path)
+
+    print(f"Loading base model from: {local_model_path}")
+    model = AutoModelForCausalLM.from_pretrained(
+        local_model_path,
+        trust_remote_code=True, 
+        torch_dtype=torch.bfloat16,
+        local_files_only=True,
+    )
+    print("Base model loaded successfully.")
+    return model, tokenizer
 
 def train(args):
     # configure strategy
@@ -36,33 +57,45 @@ def train(args):
 
     # configure model
     # load huggingface model
-    pretrain, tokenizer = init_model()
-    model = Actor(
-        pretrain,
-        tokenizer=tokenizer,
-        use_flash_attention_2=args.flash_attn,
-        bf16=args.bf16,
-        load_in_4bit=args.load_in_4bit,
-        lora_rank=args.lora_rank,
+    base_model, tokenizer = init_model(args)
+
+    # 2. Create the LoRA config from args
+    lora_config = LoraConfig(
+        r=args.lora_rank,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
+        bias="none",
+        task_type="CAUSAL_LM",
         target_modules=args.target_modules,
-        ds_config=strategy.get_ds_train_config(is_actor=True),
-        use_liger_kernel=args.use_liger_kernel
     )
-
-    # configure tokenizer
-    # tokenizer = get_tokenizer(args.pretrain, model.model, "right", strategy, use_fast=not args.disable_fast_tokenizer)
-    strategy.print(model)
-
-    # load weights for ref model
-    ref_model = Actor(
-        pretrain,
+    # 3. Apply LoRA adapters to create the PEFT model
+    peft_model = get_peft_model(base_model, lora_config)
+    
+    # 4. Wrap the PEFT model in your Actor class
+    model = Actor(
+        peft_model,
         tokenizer=tokenizer,
         use_flash_attention_2=args.flash_attn,
         bf16=args.bf16,
-        load_in_4bit=args.load_in_4bit,
-        ds_config=strategy.get_ds_eval_config(offload=args.ref_offload)
+        ds_config=strategy.get_ds_train_config(is_actor=True),
+    )
+
+    strategy.print("Trainable parameters:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            strategy.print(name)
+
+    # --- REFERENCE MODEL CREATION ---
+    # 1. Load a FRESH, clean base model for the reference model
+    ref_base_model, _ = init_model(args)
+    
+    # 2. Wrap the BASE model in the Actor class. NO LoRA.
+    ref_model = Actor(
+        ref_base_model,
+        tokenizer=tokenizer,
+        use_flash_attention_2=args.flash_attn,
+        bf16=args.bf16,
+        ds_config=strategy.get_ds_eval_config(offload=args.ref_offload),
     )
     if args.ref_offload:
         ref_model._offload = True
