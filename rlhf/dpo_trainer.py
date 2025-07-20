@@ -194,13 +194,14 @@ class DPOTrainer(ABC):
                     "chosen_reward": chosen_reward.mean().item(),
                     "reject_reward": reject_reward.mean().item(),
                     "lr": self.scheduler.get_last_lr()[0],
+                    "reward_diff": (chosen_reward - reject_reward).mean().item(),
                 }
 
                 # step bar
                 logs_dict = self.strategy.all_reduce(logs_dict)
                 step_bar.set_postfix(logs_dict)
                 step_bar.update()
-
+                torch.cuda.empty_cache()
                 # logs/checkpoints/evaluation
                 if step % self.strategy.accumulated_gradient == 0:
                     logs_dict["loss_mean"] = loss_sum / self.strategy.accumulated_gradient

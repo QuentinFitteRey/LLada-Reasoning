@@ -8,7 +8,7 @@ OUTPUT_DIR="./dpo_checkpoints_lora"  # Where to save trained LoRA adapter
 mkdir -p "$OUTPUT_DIR"
 
 # === TRAIN CONFIG ===
-TRAIN_BATCH=16
+TRAIN_BATCH=64
 MICRO_BATCH=1
 ZERO_STAGE=2
 BF16="--bf16"
@@ -50,6 +50,7 @@ deepspeed rlhf/train_dpo.py \
     --use_wandb dc953a73754e73f853a4148bed458100f5ed36f7\
     --wandb_project "LLada-Reasoning" \
     --wandb_run_name "VRPO_lora" \
+    --ref_offload \
     $BF16 \
     $FLASH \
     $GRAD_CHECK \
