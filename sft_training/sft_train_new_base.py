@@ -132,11 +132,11 @@ def calc_sft_loss(model, batch, mask_id, pad_id, eps, think_end_id, answer_weigh
     # --- STABILITY CORRECTION ---
     # The risky normalization by p_mask has been removed to prevent exploding gradients.
     # The dynamic masking itself is a strong enough regularizer.
-    # norm_loss = loss / p_mask[loss_mask]
+    norm_loss = loss / p_mask[loss_mask]
 
     # Apply the weights directly to the standard cross-entropy loss.
     # This is a much more stable way to weight different parts of the sequence.
-    weighted_loss = loss * weights[loss_mask]
+    weighted_loss = norm_loss * weights[loss_mask]
 
     total_ans_toks = torch.sum(ans_mask.int(), dim=1).sum()
     if total_ans_toks == 0:

@@ -262,16 +262,16 @@ def main():
 #     You may **not** partially empty a jug, nor exceed a jug's capacity. If your sequence exceeds six moves, discard it and start over. PLEASE track your moves and the state of the jugs at each step.
 #     """
 
-    #prompt += "A number consists of two digits. The digit in the tens place is three times the digit in the units place. If you reverse the digits, the new number is 36 less than the original number. What is the original number? You have to ouput the answer at the end even if you are not sure about the answer. \n"
-    prompt += """
-    Given the following question and four candidate answers (A, B, C and D), choose the best answer.
-Question: Let p = (1, 2, 5, 4)(2, 3) in S_5 . Find the index of <p> in S_5.
-A. 8
-B. 2
-C. 24
-D. 120
-Your response should end with "The best answer is [the_answer_letter]" where the [the_answer_letter] is one of A, B, C or D.
-    """
+    # prompt += "A number consists of two digits. The digit in the tens place is three times the digit in the units place. If you reverse the digits, the new number is 36 less than the original number. What is the original number? You have to ouput the answer at the end even if you are not sure about the answer. \n"
+#     prompt += """
+#     Given the following question and four candidate answers (A, B, C and D), choose the best answer.
+# Question: Let p = (1, 2, 5, 4)(2, 3) in S_5 . Find the index of <p> in S_5.
+# A. 8
+# B. 2
+# C. 24
+# D. 120
+# Your response should end with "The best answer is [the_answer_letter]" where the [the_answer_letter] is one of A, B, C or D.
+#     """
     print(f"Prompt: {prompt}")
     # Add special tokens for the Instruct model. The Base model does not require the following two lines.
     m = [{"role": "user", "content": prompt}, ]
@@ -285,10 +285,10 @@ Your response should end with "The best answer is [the_answer_letter]" where the
     t0.record()
     out, _ = generate_with_dual_cache(
         model, input_ids,
-        steps=2048*2, gen_length=2048*2, block_length=128,
+        steps=2048, gen_length=2048, block_length=128,
         temperature=0.0, remasking='low_confidence', threshold=0.9,
-        repetition_penalty=1.2, # Set penalty > 1.0 to discourage repetition
-        stop_token_id=stop_token_id
+        repetition_penalty=1.1, # Set penalty > 1.0 to discourage repetition
+        stop_token_id=None
     )
     t1.record(); torch.cuda.synchronize()
     print(f"Generation time: {t0.elapsed_time(t1)/1000:.2f}s")

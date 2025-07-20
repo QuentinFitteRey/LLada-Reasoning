@@ -5,8 +5,8 @@ from peft import PeftModel, PeftConfig, LoraConfig, get_peft_model_state_dict, s
 
 def init_model(lora=False):
     # Path to your local directory containing the modified model
-    local_model_path = "/home/hice1/qfitterey3/scratch/LLada-Reasoning/merged_model_good_base" 
-    local_model_tokenizer_path = "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_pretrain3/step-600"
+    local_model_path = "/home/hice1/qfitterey3/scratch/LLada-Reasoning/llada_local_1.5" 
+    local_model_tokenizer_path = "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-600"
 
     print(f"Loading tokenizer from: {local_model_tokenizer_path}")
     tokenizer = AutoTokenizer.from_pretrained(local_model_tokenizer_path, use_fast=True, local_files_only=True)
@@ -23,6 +23,7 @@ def init_model(lora=False):
         local_files_only=True,  # Ensure it loads from local files only
     )
     print("Model loaded successfully with local modifications.")
+    print(model)
     # special_tokens_to_add = {
     # "additional_special_tokens": ["<|mdm_mask|>", "<think>", "</think>"]
     # }
@@ -39,10 +40,10 @@ def init_model(lora=False):
 
     if lora:
         lora_config = PeftConfig.from_pretrained(
-            "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_pretrain3/step-600/sft_adapter"
+            "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-600/sft_adapter"
         )
         print("Loading LoRA configuration...")
-        model = PeftModel.from_pretrained(model, "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_pretrain3/step-600/sft_adapter", lora_config=lora_config)
+        model = PeftModel.from_pretrained(model, "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-600/sft_adapter", lora_config=lora_config)
         print("LoRA model loaded successfully.")
     return model, tokenizer
 
