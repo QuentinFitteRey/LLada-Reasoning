@@ -16,7 +16,7 @@ from lm_eval.api.registry import register_model
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer, AutoModel
-from new_generation import generate_with_dual_cache
+from new_generation_quentin import generate_with_dual_cache
 from generate import generate
 from init_model import init_model
 from accelerate import Accelerator
@@ -469,6 +469,17 @@ class LLaDAEvalHarness(LM):
                         clean = clean.strip() + f"\n#### {extracted_answer}"
                     else:
                         print(f"[Warning] No numeric answer found in GSM8K output:\n{clean}", file=sys.stderr)
+
+            elif self.task == "hendrycks_math": # WIP: Very bad rn
+                # find all $…$ spans
+                dollars = [i for i,ch in enumerate(text) if ch=='$']
+                if len(dollars)>=2:
+                    ans = text[dollars[0]+1 : dollars[-1]]
+                else:
+                    ans = text
+                # strip any “\boxed{…}”
+                ans = re.sub(r".*\\boxed\{(.*)\}.*", r"\1", ans, flags=re.DOTALL)
+                clean = ans.strip()
 
             out.append(clean)
 

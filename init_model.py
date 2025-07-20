@@ -28,7 +28,7 @@ def init_model(
     )
 
     special_tokens_to_add = {
-    "additional_special_tokens": ["<|mdm_mask|>", "<think>", "</think>"]
+        "additional_special_tokens": ["<|mdm_mask|>", "<think>", "</think>", "<|start_header_id|>", "<|end_header_id|>","<|eot_id|>"]
     }
 
     if tokenizer.pad_token is None:
