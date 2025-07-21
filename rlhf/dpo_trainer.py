@@ -1,6 +1,7 @@
 import os
 from abc import ABC
 
+from click import prompt
 import torch
 from torch.optim import Optimizer
 from tqdm import tqdm
@@ -125,44 +126,16 @@ class DPOTrainer(ABC):
         noisy_input = torch.where(masked_indices, self.mask_id, input_ids)
         return noisy_input, masked_indices, p_mask
 
-    def monte_carlo_forward(self, input_ids, input_mask, n_t=8, n_yt=1, eps=0.1):
-        """
-        Compute the ELBO estimator with double monte carlo
-        """
-        b = input_ids.size(0)
-        model_loss = torch.zeros(b, device=input_ids.device)
-        ref_loss = torch.zeros(b, device=input_ids.device)
-        count_model = 0
-        count_ref = 0
-        for _ in range(n_t):
-            t = (1 - eps) * torch.rand(1).item() + eps 
-            for _ in range(n_yt):
-                noisy_input, masked, p_mask = self.forward_process(input_ids, t)
-                l_pi_model = self.model(input_ids, input_mask, masked, t)
-                with torch.no_grad():
-                    l_pi_ref = self.ref_model(input_ids, input_mask, masked, t)
-                if l_pi_model is not None:
-                    model_loss = model_loss + l_pi_model  # loss is shape (B,)
-                    count_model += 1
-                if l_pi_ref is not None:
-                    ref_loss = ref_loss + l_pi_ref
-                    count_ref += 1
-                # print(f"Random sampling: t:{t}; mask:{masked.sum()}; l_pi:{l_pi}")
-        return model_loss / count_model, ref_loss / count_ref  # shape: (B,)
-
     def fit(self, args, consumed_samples=0, num_update_steps_per_epoch=None):
         # get eval and save steps
         if args.eval_steps == -1:
             args.eval_steps = num_update_steps_per_epoch  # Evaluate once per epoch
         if args.save_steps == -1:
             args.save_steps = float("inf")  # do not save ckpt
-        def print_gpu_memory_stats(stage_name):
-            print(f"--- GPU Memory Stats at {stage_name} ---")
-            print(f"Allocated: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
-            print(f"Reserved: {torch.cuda.memory_reserved() / (1024**3):.2f} GB")
-            print("-" * 40)
-        
-        # print_gpu_memory_stats("Start of fit method")
+
+        # Define constants for the new loop
+        n_t = 8  # Your number of Monte Carlo samples
+        eps = 0.1 # Your epsilon for mask ratio sampling
 
         step = consumed_samples // args.train_batch_size * self.strategy.accumulated_gradient + 1
         start_epoch = consumed_samples // args.train_batch_size // num_update_steps_per_epoch
@@ -173,8 +146,7 @@ class DPOTrainer(ABC):
             desc="Train epoch",
             disable=not self.strategy.is_rank_0(),
         )
-        acc_sum = 0
-        loss_sum = 0
+
         for epoch in range(start_epoch, self.epochs):
             if isinstance(self.train_dataloader.sampler, DistributedSampler):
                 self.train_dataloader.sampler.set_epoch(
@@ -187,53 +159,79 @@ class DPOTrainer(ABC):
                 disable=not self.strategy.is_rank_0(),
             )
 
-            # def deep_train(m):
-            #     m.train()
-            #     for child in m.children():
-            #         deep_train(child)
-            # deep_train(self.model)
             self.model.train()
-            # self.model.train()
             self.ref_model.eval()
-            # for name, module in self.model.named_modules():
-            #     if 'lora' in name or isinstance(module, torch.nn.Dropout):
-            #         print(f"{name}: training={module.training}")
-            # train
+
             for step_idx, data in enumerate(self.train_dataloader):
-                # print_gpu_memory_stats(f"After Data Loading (Step {step_idx})")
                 chosen_ids, c_mask, reject_ids, r_mask, prompt_id_lens = data
+                prompt_id_lens = torch.tensor(prompt_id_lens, device=chosen_ids.device)
                 chosen_ids = chosen_ids.squeeze(1).to(torch.cuda.current_device())
                 c_mask = c_mask.squeeze(1).to(torch.cuda.current_device())
                 reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
                 r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
+                print(f"chose answer{self.tokenizer.batch_decode(chosen_ids, skip_special_tokens=True)}")
+                print(f"reject answer{self.tokenizer.batch_decode(reject_ids, skip_special_tokens=True)}")
+                #print prompt only based on length
+                print(f"prompt length: {prompt_id_lens}")
+                print(f"prompt: {self.tokenizer.batch_decode(chosen_ids[:, :prompt_id_lens[0]], skip_special_tokens=True)}")   
 
-                # print_gpu_memory_stats(f"After Model Forward (Step {step_idx})")
-                # loss function
-                chosen_logps, reference_chosen_logps = self.monte_carlo_forward(chosen_ids, c_mask)
-                rejected_logps, reference_rejected_logps = self.monte_carlo_forward(reject_ids, r_mask)
-                loss, chosen_reward, reject_reward = self.loss_fn(
-                    chosen_logps, rejected_logps, reference_chosen_logps, reference_rejected_logps
-                )
-                # print_gpu_memory_stats(f"After Loss Calculation (Step {step_idx})")
-                # self.strategy.print(f"Step: {step}, Loss: {loss.item()}, Grad Function: {loss.grad_fn}")
-                self.strategy.backward(loss, self.model, self.optimizer)
-                # print_gpu_memory_stats(f"After Backward Pass (Step {step_idx})")
+                # Accumulators for logging average values
+                batch_loss_sum = 0
+                batch_chosen_reward_sum = 0
+                batch_reject_reward_sum = 0
+
+                # --- START: New Monte Carlo & Gradient Accumulation Loop ---
+                for _ in range(n_t):
+                    # 1. Generate ONE random mask ratio `t` for a fair comparison
+                    t = (1 - eps) * torch.rand(1).item() + eps
+                    
+                    # 2. Process CHOSEN sequence with this `t`
+                    _, masked_chosen, _ = self.forward_process(chosen_ids, t)
+                    _, masked_rejected, _ = self.forward_process(reject_ids, t)
+                    # 3. Process REJECTED sequence with the SAME `t`
+                    policy_chosen_logps = self.model(chosen_ids, c_mask, masked_chosen, prompt_id_lens, t)
+                    with torch.no_grad():
+                        ref_chosen_logps = self.ref_model(chosen_ids, c_mask, masked_chosen, prompt_id_lens, t)
+                    
+                    policy_rejected_logps = self.model(reject_ids, r_mask, masked_rejected, prompt_id_lens, t)
+                    with torch.no_grad():
+                        ref_rejected_logps = self.ref_model(reject_ids, r_mask, masked_rejected, prompt_id_lens, t)
+ 
+                    
+                    # 4. Calculate DPO loss for this SINGLE, FAIR comparison
+                    loss, chosen_reward, reject_reward = self.loss_fn(
+                        policy_chosen_logps,
+                        policy_rejected_logps,
+                        ref_chosen_logps,
+                        ref_rejected_logps
+                    )
+                    
+                    # 5. Scale loss for averaging and backpropagate.
+                    # This accumulates gradients correctly without memory spikes.
+                    scaled_loss = loss / n_t
+                    self.strategy.backward(scaled_loss, self.model, self.optimizer)
+
+                    # Accumulate stats for logging
+                    batch_loss_sum += loss.item()
+                    batch_chosen_reward_sum += chosen_reward.mean().item()
+                    batch_reject_reward_sum += reject_reward.mean().item()
+                # --- END: New Monte Carlo & Gradient Accumulation Loop ---
+
+                # 6. Step the optimizer AFTER all gradients are accumulated
                 self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
-                # print_gpu_memory_stats(f"After Optimizer Step (Step {step_idx})")
-                # for name, param in self.model.model.named_parameters():
-                #     if param.grad is not None:
-                #         print("gradients: ", name, param.grad.abs().mean())
-                #     break
-                acc = (chosen_reward > reject_reward).float().mean().item()
-                acc_sum += acc
-                loss_sum += loss.item()
-                # dpo logs
+                
+                # Update logs with the averaged values from the MC samples
+                avg_loss = batch_loss_sum / n_t
+                avg_chosen_reward = batch_chosen_reward_sum / n_t
+                avg_reject_reward = batch_reject_reward_sum / n_t
+                acc = (avg_chosen_reward > avg_reject_reward)
+
                 logs_dict = {
-                    "loss": loss.item(),
+                    "loss": avg_loss,
                     "acc": acc,
-                    "chosen_reward": chosen_reward.mean().item(),
-                    "reject_reward": reject_reward.mean().item(),
-                    "reward_diff": (chosen_reward - reject_reward).mean().item(),
+                    "chosen_reward": avg_chosen_reward,
+                    "reject_reward": avg_reject_reward,
+                    "reward_diff": avg_chosen_reward - avg_reject_reward,
                     "lr": self.scheduler.get_last_lr()[0],
                 }
 
@@ -241,19 +239,16 @@ class DPOTrainer(ABC):
                 logs_dict = self.strategy.all_reduce(logs_dict)
                 step_bar.set_postfix(logs_dict)
                 step_bar.update()
-                # logs/checkpoints/evaluation
+
+                # Global step for logging and checkpointing
                 if step % self.strategy.accumulated_gradient == 0:
-                    logs_dict["loss_mean"] = loss_sum / self.strategy.accumulated_gradient
-                    logs_dict["acc_mean"] = acc_sum / self.strategy.accumulated_gradient
-                    loss_sum = 0
-                    acc_sum = 0
                     global_step = step // self.strategy.accumulated_gradient
                     client_states = {"consumed_samples": global_step * args.train_batch_size}
                     torch.cuda.empty_cache()
                     self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
 
                 step += 1
-
+            
             epoch_bar.update()
 
         if self._wandb is not None and self.strategy.is_rank_0():
@@ -304,16 +299,22 @@ class DPOTrainer(ABC):
             times = 0
             for data in eval_dataloader:
                 chosen_ids, c_mask, reject_ids, r_mask, prompt_id_lens = data
+                prompt_id_lens = torch.tensor(prompt_id_lens, device=chosen_ids.device)
                 chosen_ids = chosen_ids.squeeze(1).to(torch.cuda.current_device())
                 c_mask = c_mask.squeeze(1).to(torch.cuda.current_device())
                 reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
                 r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
 
-                chosen_logps, reference_chosen_logps = self.monte_carlo_forward(chosen_ids, c_mask)
-                rejected_logps, reference_rejected_logps = self.monte_carlo_forward(reject_ids, r_mask)
-
+                _, masked_chosen, _ = self.forward_process(chosen_ids, t)
+                _, masked_rejected, _ = self.forward_process(reject_ids, t)
+                # 3. Process REJECTED sequence with the SAME `t`
+                policy_chosen_logps = self.model(chosen_ids, c_mask, masked_chosen, prompt_id_lens, t)
+                ref_chosen_logps = self.ref_model(chosen_ids, c_mask, masked_chosen, prompt_id_lens, t)
+                
+                policy_rejected_logps = self.model(reject_ids, r_mask, masked_rejected, prompt_id_lens, t)
+                ref_rejected_logps = self.ref_model(reject_ids, r_mask, masked_rejected, prompt_id_lens, t)
                 loss, chosen_reward, reject_reward = self.loss_fn(
-                    chosen_logps, rejected_logps, reference_chosen_logps, reference_rejected_logps
+                    policy_chosen_logps, policy_rejected_logps, ref_chosen_logps, ref_rejected_logps
                 )
                 acc_sum += (chosen_reward > reject_reward).float().mean().item()
                 loss_sum += loss.item()

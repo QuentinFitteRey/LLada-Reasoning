@@ -57,6 +57,7 @@ class Actor(nn.Module):
             self.tokenizer = tokenizer
         self.model = pretrain_or_model
         self.mask_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
+        self.pad_id = self.tokenizer.pad_token_id
 
     def forward(
         self,
@@ -64,67 +65,71 @@ class Actor(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         masked: Optional[torch.Tensor] = None,
         t: Optional[torch.Tensor] | float = None,
+        prompt_id_lens: Optional[torch.Tensor] = None,
         mode: Literal["loss", "fall_through"] = "loss",
     ) -> torch.Tensor:
         """Returns action log probs"""
         if mode == "loss":
-            loss, _ =  self.calc_loss(sequences, attention_mask, masked, t)
+            loss, _ = self.calc_loss(sequences, attention_mask, masked, prompt_id_lens, t)
             return loss
         elif mode == "fall_through":
             return self.model(sequences, attention_mask)
     
-    def l_pi_from_logits(self, logits, labels, mask, t: float = 1.0) -> torch.Tensor:
+    def l_pi_from_logits(self, logits, labels, mask, prompt_id_lens, t: float = 1.0) -> torch.Tensor:
         """
-        logits -> l_pi by averaging the log probs of predicting ground truth on masked tokens
+        Calculates log prob by averaging over masked tokens IN THE ANSWER ONLY.
         """
-        log_probs = F.log_softmax(logits/self.temperature, dim=-1)  # log p_theta [B, T, V]
-        log_p_theta_at_targets = log_probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)  # [B, T]
-        masked_log_probs = log_p_theta_at_targets * mask.float()  # [B, T]
-        l_pi = masked_log_probs.sum(dim=1) / (t + 1e-8)  # [B]
+        b, l = labels.shape
+        dev = labels.device
+
+        # --- MODIFIED: Create a mask for the answer part only ---
+        pos = torch.arange(l, device=dev).unsqueeze(0)
+        ans_mask = pos >= prompt_id_lens.unsqueeze(1)
+        
+        # The final loss mask includes only tokens that are:
+        # 1. In the answer.
+        # 2. Were randomly selected to be masked.
+        # 3. Are not padding tokens.
+        final_loss_mask = ans_mask & mask & (labels != self.pad_id)
+        # --- END MODIFICATION ---
+
+        if not final_loss_mask.any():
+            return torch.zeros(b, device=dev)
+
+        log_probs = F.log_softmax(logits / self.temperature, dim=-1)
+        log_p_theta_at_targets = log_probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+
+        # Apply the final, precise mask
+        masked_log_probs = log_p_theta_at_targets * final_loss_mask.float()
+        
+        # Sum the log-probs for the sequence. Normalization by `t` is specific to the Llada objective.
+        l_pi = masked_log_probs.sum(dim=1) / (t + 1e-8)
         return l_pi
-    
-    def calc_loss(self, input_ids, attention_mask, masked, t):
+
+    def calc_loss(self, input_ids, attention_mask, masked_indices, prompt_id_lens, t):
         """
-        compute l_pi(y_t, t, y|x), the token-level per-timestep ELBO loss, from a input_ids = x||y
+        Computes the sequence log-probability, ensuring the prompt is not masked.
         """
         b, l = input_ids.shape
-        if l == 0: raise Exception("length is zero.")
-        noisy_input = torch.where(masked, self.mask_id, input_ids)
-        logits = self.model(noisy_input, attention_mask=attention_mask).logits
-        l_pi = self.l_pi_from_logits(logits, input_ids, masked, t)
-        return l_pi, logits
+        dev = input_ids.device
+        if l == 0:
+            return torch.zeros(b, device=dev), None
 
-    # def monte_carlo_forward(self, input_ids, input_mask, shared_mask=None, n_t=8, n_yt=1, eps=0.1):
-    #     """
-    #     Compute the ELBO estimator with double monte carlo
-    #     """
-    #     # print("This is one run")
-    #     b = input_ids.size(0)
-    #     total_loss = torch.zeros(b, device=input_ids.device)
-    #     if shared_mask is None:
-    #         count = 0
-    #         shared_mask = []
-    #         for _ in range(n_t):
-    #             t = (1 - eps) * torch.rand(1).item() + eps 
-    #             for _ in range(n_yt):
-    #                 noisy_input, masked, p_mask = self.forward_process(input_ids, t)
-    #                 shared_mask.append((t, masked))
-    #                 l_pi, _ = self.calc_loss(input_ids,input_mask, noisy_input, masked, t)
-    #                 if l_pi is not None:
-    #                     total_loss  = total_loss + l_pi  # loss is shape (B,)
-    #                     count += 1
-    #                 # print(f"Random sampling: t:{t}; mask:{masked.sum()}; l_pi:{l_pi}")
-    #         if count == 0:
-    #             return torch.zeros(b, device=input_ids.device)
-    #         return total_loss / count, shared_mask  # shape: (B,)
-    #     else:
-    #         for t, masked in shared_mask:
-    #             noisy_input = torch.where(masked, self.mask_id, input_ids)
-    #             l_pi, _ = self.calc_loss(input_ids, input_mask, noisy_input, masked, t)
-    #             if l_pi is not None:
-    #                 total_loss = total_loss + l_pi
-    #             # print(f"shared mask: t:{t}; mask:{masked.sum()}; l_pi:{l_pi}")
-    #         return total_loss / len(shared_mask), shared_mask  # shape: (B,)
+        # --- MODIFIED: Un-mask the prompt ---
+        # 1. Create the noisy input from the boolean mask
+        noisy_input = torch.where(masked_indices, self.mask_id, input_ids)
+        
+        # 2. Create a mask for the prompt section
+        pos = torch.arange(l, device=dev).unsqueeze(0)
+        prompt_mask_bool = pos < prompt_id_lens.unsqueeze(1)
+
+        # 3. Restore the original prompt in the noisy input
+        noisy_input[prompt_mask_bool] = input_ids[prompt_mask_bool]
+        # --- END MODIFICATION ---
+
+        logits = self.model(noisy_input, attention_mask=attention_mask).logits
+        l_pi = self.l_pi_from_logits(logits, input_ids, masked_indices, prompt_id_lens, t)
+        return l_pi, logits
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={"use_reentrant": False}):
         self.model.set_activation_checkpointing(ActivationCheckpointingStrategy.fine_grained)
