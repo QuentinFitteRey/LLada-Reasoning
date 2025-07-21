@@ -8,7 +8,7 @@ OUTPUT_DIR="./dpo_checkpoints_lora"  # Where to save trained LoRA adapter
 mkdir -p "$OUTPUT_DIR"
 
 # === TRAIN CONFIG ===
-TRAIN_BATCH=16
+TRAIN_BATCH=64
 MICRO_BATCH=1
 ZERO_STAGE=2
 BF16="--bf16"
@@ -27,6 +27,7 @@ LORA_ARGS="\
 "
 
 export DS_MASTER_PORT=42000
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True 
 
 # === RUN ===
 deepspeed rlhf/train_dpo.py \
@@ -50,8 +51,9 @@ deepspeed rlhf/train_dpo.py \
     --use_wandb dc953a73754e73f853a4148bed458100f5ed36f7\
     --wandb_project "LLada-Reasoning" \
     --wandb_run_name "VRPO_lora" \
+    --gradient_checkpointing \
     $BF16 \
     $FLASH \
     $GRAD_CHECK \
-    $LORA_ARGS > training_output.log 2>&1
+    $LORA_ARGS
     # --apply_chat_template \

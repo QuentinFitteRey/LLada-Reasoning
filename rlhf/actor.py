@@ -1,5 +1,5 @@
 from typing import Optional, Literal
-
+from configuration_llada import ActivationCheckpointingStrategy
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -61,19 +61,15 @@ class Actor(nn.Module):
     def forward(
         self,
         sequences: torch.LongTensor,
-        action_mask: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        shared_mask: Optional[torch.Tensor] = None,
-        return_output=False,
-        return_logprobs=False,
-        mode: Literal["monte_carlo", "fall_through"] = "monte_carlo",
-        return_entropy=False,
+        masked: Optional[torch.Tensor] = None,
+        t: Optional[torch.Tensor] | float = None,
+        mode: Literal["loss", "fall_through"] = "loss",
     ) -> torch.Tensor:
         """Returns action log probs"""
-        batch, seqlen = sequences.size()
-        if mode == "monte_carlo":
-            output = self.monte_carlo_forward(sequences, attention_mask, shared_mask=shared_mask)
-            return output
+        if mode == "loss":
+            loss, _ =  self.calc_loss(sequences, attention_mask, masked, t)
+            return loss
         elif mode == "fall_through":
             return self.model(sequences, attention_mask)
     
@@ -87,63 +83,56 @@ class Actor(nn.Module):
         l_pi = masked_log_probs.sum(dim=1) / (t + 1e-8)  # [B]
         return l_pi
     
-    def monte_carlo_forward(self, input_ids, input_mask, shared_mask=None, n_t=8, n_yt=1, eps=0.1):
-        """
-        Compute the ELBO estimator with double monte carlo
-        """
-        # print("This is one run")
-        b = input_ids.size(0)
-        total_loss = torch.zeros(b, device=input_ids.device)
-        if shared_mask is None:
-            count = 0
-            shared_mask = []
-            for _ in range(n_t):
-                t = (1 - eps) * torch.rand(1).item() + eps 
-                for _ in range(n_yt):
-                    noisy_input, masked, p_mask = self.forward_process(input_ids, t)
-                    shared_mask.append((t, masked))
-                    l_pi, _ = self.calc_loss(input_ids,input_mask, noisy_input, masked, t)
-                    if l_pi is not None:
-                        total_loss  = total_loss + l_pi  # loss is shape (B,)
-                        count += 1
-                    # print(f"Random sampling: t:{t}; mask:{masked.sum()}; l_pi:{l_pi}")
-            if count == 0:
-                return torch.zeros(b, device=input_ids.device)
-            return total_loss / count, shared_mask  # shape: (B,)
-        else:
-            for t, masked in shared_mask:
-                noisy_input = torch.where(masked, self.mask_id, input_ids)
-                l_pi, _ = self.calc_loss(input_ids, input_mask, noisy_input, masked, t)
-                if l_pi is not None:
-                    total_loss = total_loss + l_pi
-                # print(f"shared mask: t:{t}; mask:{masked.sum()}; l_pi:{l_pi}")
-            return total_loss / len(shared_mask), shared_mask  # shape: (B,)
-
-    def calc_loss(self, input_ids, attention_mask, noisy_input, masked, t):
+    def calc_loss(self, input_ids, attention_mask, masked, t):
         """
         compute l_pi(y_t, t, y|x), the token-level per-timestep ELBO loss, from a input_ids = x||y
         """
         b, l = input_ids.shape
         if l == 0: raise Exception("length is zero.")
+        noisy_input = torch.where(masked, self.mask_id, input_ids)
         logits = self.model(noisy_input, attention_mask=attention_mask).logits
         l_pi = self.l_pi_from_logits(logits, input_ids, masked, t)
         return l_pi, logits
 
-    def forward_process(self, input_ids, mask_ratio):
-        b, l = input_ids.shape
-        if isinstance(mask_ratio, torch.Tensor) and mask_ratio.ndim == 1: 
-            p_mask = mask_ratio.view(b, 1).expand(b, l)
-        else: 
-            p_mask = torch.full((b, l), mask_ratio, device=input_ids.device)
-        masked_indices = torch.rand_like(p_mask, dtype=torch.float) < p_mask
-        noisy_input = torch.where(masked_indices, self.mask_id, input_ids)
-        return noisy_input, masked_indices, p_mask
+    # def monte_carlo_forward(self, input_ids, input_mask, shared_mask=None, n_t=8, n_yt=1, eps=0.1):
+    #     """
+    #     Compute the ELBO estimator with double monte carlo
+    #     """
+    #     # print("This is one run")
+    #     b = input_ids.size(0)
+    #     total_loss = torch.zeros(b, device=input_ids.device)
+    #     if shared_mask is None:
+    #         count = 0
+    #         shared_mask = []
+    #         for _ in range(n_t):
+    #             t = (1 - eps) * torch.rand(1).item() + eps 
+    #             for _ in range(n_yt):
+    #                 noisy_input, masked, p_mask = self.forward_process(input_ids, t)
+    #                 shared_mask.append((t, masked))
+    #                 l_pi, _ = self.calc_loss(input_ids,input_mask, noisy_input, masked, t)
+    #                 if l_pi is not None:
+    #                     total_loss  = total_loss + l_pi  # loss is shape (B,)
+    #                     count += 1
+    #                 # print(f"Random sampling: t:{t}; mask:{masked.sum()}; l_pi:{l_pi}")
+    #         if count == 0:
+    #             return torch.zeros(b, device=input_ids.device)
+    #         return total_loss / count, shared_mask  # shape: (B,)
+    #     else:
+    #         for t, masked in shared_mask:
+    #             noisy_input = torch.where(masked, self.mask_id, input_ids)
+    #             l_pi, _ = self.calc_loss(input_ids, input_mask, noisy_input, masked, t)
+    #             if l_pi is not None:
+    #                 total_loss = total_loss + l_pi
+    #             # print(f"shared mask: t:{t}; mask:{masked.sum()}; l_pi:{l_pi}")
+    #         return total_loss / len(shared_mask), shared_mask  # shape: (B,)
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={"use_reentrant": False}):
-        self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
+        self.model.set_activation_checkpointing(ActivationCheckpointingStrategy.fine_grained)
+        self.model.config.use_cache = False
+        self.model.enable_input_require_grads()
 
     def gradient_checkpointing_disable(self):
-        self.model.gradient_checkpointing_disable()
+        self.model.set_activation_checkpointing(None)
 
     def print_trainable_parameters(self):
         self.model.print_trainable_parameters()

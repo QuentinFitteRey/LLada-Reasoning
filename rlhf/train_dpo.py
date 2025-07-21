@@ -80,11 +80,10 @@ def train(args):
         ds_config=strategy.get_ds_train_config(is_actor=True),
     )
 
-    strategy.print("Trainable parameters:")
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            strategy.print(name)
-
+    # strategy.print("Trainable parameters:")
+    # for name, param in model.named_parameters():
+    #     if param.requires_grad:
+    #         strategy.print(name)
     # --- REFERENCE MODEL CREATION ---
     # 1. Load a FRESH, clean base model for the reference model
     ref_base_model, _ = init_model(args)

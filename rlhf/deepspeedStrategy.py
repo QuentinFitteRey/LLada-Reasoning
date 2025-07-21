@@ -144,13 +144,6 @@ class DeepspeedStrategy(ABC):
         if isinstance(model, Actor):
             model = model.model
         model.backward(loss)
-        print("Backward pass completed.")
-        # print("model backward: ", model)
-        print("loss: ", loss.item())
-        for name, param in model.named_parameters():
-            if 'lora' in name:
-                print(f"{name} requires_grad = {param.requires_grad}, grad = {param.grad}")
-            break
 
     def optimizer_step(
         self,
