@@ -51,6 +51,7 @@ deepspeed rlhf/train_dpo.py \
     --use_wandb dc953a73754e73f853a4148bed458100f5ed36f7\
     --wandb_project "LLada-Reasoning" \
     --wandb_run_name "VRPO_lora" \
+    --gradient_checkpointing \
     $BF16 \
     $FLASH \
     $GRAD_CHECK \

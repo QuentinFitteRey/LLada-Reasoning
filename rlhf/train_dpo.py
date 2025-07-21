@@ -8,7 +8,7 @@ from datetime import datetime
 
 from transformers.trainer import get_scheduler
 from rlhf.actor import Actor
-
+from functools import partial
 from openrlhf.datasets import RewardDataset
 from openrlhf.datasets.utils import blending_datasets
 from rlhf.dpo_trainer import DPOTrainer
@@ -118,11 +118,11 @@ def train(args):
         max_count=args.max_samples,
         dataset_split=args.dataset_split,
     )
-    def map_shp_preformatted_prompt(example, max_len=4096):
+    def map_shp_preformatted_prompt(example, tokenizer, max_len=4000):
         """
-        Pre-formats the prompt according to the chat template and filters out long examples
-        using character-length approximation (much faster than tokenizing).
+        Pre-formats the prompt according to the chat template and filters out long examples.
         """
+
         user_prompt = example["history"]
 
         formatted_prompt = (
@@ -138,14 +138,15 @@ def train(args):
             chosen_response = example["human_ref_A"]
             rejected_response = example["human_ref_B"]
 
-        # Combine strings
         chosen_full = formatted_prompt + chosen_response.strip() + "<|eot_id|>"
         rejected_full = formatted_prompt + rejected_response.strip() + "<|eot_id|>"
 
-        # Use a conservative estimate: assume ~4 chars per token
-        char_limit = max_len * 4
+        # Tokenize to check length
+        chosen_len = len(tokenizer(chosen_full, add_special_tokens=False)["input_ids"])
+        rejected_len = len(tokenizer(rejected_full, add_special_tokens=False)["input_ids"])
 
-        if len(chosen_full) > char_limit or len(rejected_full) > char_limit:
+        # Filter if either is too long
+        if chosen_len > max_len or rejected_len > max_len:
             return None
 
         return {
@@ -156,7 +157,7 @@ def train(args):
 
 
     train_data = train_data.map(
-        map_shp_preformatted_prompt,
+        partial(map_shp_preformatted_prompt, tokenizer=tokenizer),
         remove_columns=train_data.column_names
     ).filter(lambda x: x is not None)
 
