@@ -118,21 +118,19 @@ def train(args):
         max_count=args.max_samples,
         dataset_split=args.dataset_split,
     )
-    def map_shp_preformatted_prompt(example):
+    def map_shp_preformatted_prompt(example, max_len=4096):
         """
-        Pre-formats the prompt according to the chat template, leaving the
-        responses ready for simple concatenation.
+        Pre-formats the prompt according to the chat template and filters out long examples
+        using character-length approximation (much faster than tokenizing).
         """
         user_prompt = example["history"]
 
-        # The prompt is formatted with all tokens leading up to the assistant's turn
         formatted_prompt = (
             f"<|begin_of_text|>"
             f"<|start_header_id|>user<|end_header_id|>\n\n{user_prompt.strip()}<|eot_id|>"
             f"<|start_header_id|>assistant<|end_header_id|>\n\n"
         )
 
-        # Determine which response is chosen and which is rejected
         if example["labels"] == 1:
             chosen_response = example["human_ref_B"]
             rejected_response = example["human_ref_A"]
@@ -140,14 +138,27 @@ def train(args):
             chosen_response = example["human_ref_A"]
             rejected_response = example["human_ref_B"]
 
-        # The response strings just need the end-of-turn token appended
+        # Combine strings
+        chosen_full = formatted_prompt + chosen_response.strip() + "<|eot_id|>"
+        rejected_full = formatted_prompt + rejected_response.strip() + "<|eot_id|>"
+
+        # Use a conservative estimate: assume ~4 chars per token
+        char_limit = max_len * 4
+
+        if len(chosen_full) > char_limit or len(rejected_full) > char_limit:
+            return None
+
         return {
             "prompt": formatted_prompt,
-            "chosen": f"{chosen_response.strip()}<|eot_id|>",
-            "rejected": f"{rejected_response.strip()}<|eot_id|>"
+            "chosen": chosen_response.strip() + "<|eot_id|>",
+            "rejected": rejected_response.strip() + "<|eot_id|>"
         }
 
-    train_data = train_data.map(map_shp_preformatted_prompt)
+
+    train_data = train_data.map(
+        map_shp_preformatted_prompt,
+        remove_columns=train_data.column_names
+    ).filter(lambda x: x is not None)
 
     train_data = train_data.select(range(min(args.max_samples, len(train_data))))
     train_dataset = RewardDataset(
