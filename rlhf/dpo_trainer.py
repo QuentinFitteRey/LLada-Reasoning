@@ -1,14 +1,13 @@
 import os
 from abc import ABC
 
-from click import prompt
 import torch
 from torch.optim import Optimizer
 from tqdm import tqdm
 import torch.nn.functional as F
 from openrlhf.models.loss import DPOLoss
 from openrlhf.utils.distributed_sampler import DistributedSampler
-
+SAVE_EVERY = 50  # change as needed
 
 class DPOTrainer(ABC):
     """
@@ -169,11 +168,11 @@ class DPOTrainer(ABC):
                 c_mask = c_mask.squeeze(1).to(torch.cuda.current_device())
                 reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
                 r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
-                print(f"chose answer{self.tokenizer.batch_decode(chosen_ids, skip_special_tokens=True)}")
-                print(f"reject answer{self.tokenizer.batch_decode(reject_ids, skip_special_tokens=True)}")
+                # print(f"chose answer{self.tokenizer.batch_decode(chosen_ids, skip_special_tokens=False)}")
+                # print(f"reject answer{self.tokenizer.batch_decode(reject_ids, skip_special_tokens=False)}")
                 #print prompt only based on length
-                print(f"prompt length: {prompt_id_lens}")
-                print(f"prompt: {self.tokenizer.batch_decode(chosen_ids[:, :prompt_id_lens[0]], skip_special_tokens=True)}")   
+                # print(f"prompt length: {prompt_id_lens}")
+                # print(f"prompt: {self.tokenizer.batch_decode(chosen_ids[:, :prompt_id_lens[0]], skip_special_tokens=False)}")   
 
                 # Accumulators for logging average values
                 batch_loss_sum = 0
@@ -189,15 +188,16 @@ class DPOTrainer(ABC):
                     _, masked_chosen, _ = self.forward_process(chosen_ids, t)
                     _, masked_rejected, _ = self.forward_process(reject_ids, t)
                     # 3. Process REJECTED sequence with the SAME `t`
-                    policy_chosen_logps = self.model(chosen_ids, c_mask, masked_chosen, prompt_id_lens, t)
+                    policy_chosen_logps = self.model(chosen_ids, c_mask, masked_chosen, t, prompt_id_lens)
                     with torch.no_grad():
-                        ref_chosen_logps = self.ref_model(chosen_ids, c_mask, masked_chosen, prompt_id_lens, t)
+                        ref_chosen_logps = self.ref_model(chosen_ids, c_mask, masked_chosen, t, prompt_id_lens)
                     
-                    policy_rejected_logps = self.model(reject_ids, r_mask, masked_rejected, prompt_id_lens, t)
+                    policy_rejected_logps = self.model(reject_ids, r_mask, masked_rejected, t, prompt_id_lens)
                     with torch.no_grad():
-                        ref_rejected_logps = self.ref_model(reject_ids, r_mask, masked_rejected, prompt_id_lens, t)
- 
-                    
+                        ref_rejected_logps = self.ref_model(reject_ids, r_mask, masked_rejected, t, prompt_id_lens)
+
+                    # print("losses: ", policy_chosen_logps.shape, ref_chosen_logps.shape, policy_rejected_logps.shape, ref_rejected_logps.shape)
+
                     # 4. Calculate DPO loss for this SINGLE, FAIR comparison
                     loss, chosen_reward, reject_reward = self.loss_fn(
                         policy_chosen_logps,
@@ -205,6 +205,7 @@ class DPOTrainer(ABC):
                         ref_chosen_logps,
                         ref_rejected_logps
                     )
+                    # print("loss: ", loss.shape, chosen_reward.shape, reject_reward.shape)
                     
                     # 5. Scale loss for averaging and backpropagate.
                     # This accumulates gradients correctly without memory spikes.
@@ -246,7 +247,11 @@ class DPOTrainer(ABC):
                     client_states = {"consumed_samples": global_step * args.train_batch_size}
                     torch.cuda.empty_cache()
                     self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
-
+                    if global_step % SAVE_EVERY == 0 and self.strategy.is_rank_0():
+                        ckpt_path = os.path.join(self.strategy.args.save_path, f"_SHP_2_lora_ckpt_{global_step}")
+                        os.makedirs(ckpt_path, exist_ok=True)
+                        self.model.model.save_pretrained(ckpt_path)
+                        print(f"Saved LoRA checkpoint at step {global_step} to {ckpt_path}", flush=True)
                 step += 1
             
             epoch_bar.update()

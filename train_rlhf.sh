@@ -9,7 +9,7 @@ mkdir -p "$OUTPUT_DIR"
 
 # === TRAIN CONFIG ===
 TRAIN_BATCH=64
-MICRO_BATCH=1
+MICRO_BATCH=2
 ZERO_STAGE=2
 BF16="--bf16"
 FLASH="--flash_attn"
@@ -20,8 +20,8 @@ BETA=0.2
 
 # === LORA CONFIG (match your LoRAConfig) ===
 LORA_ARGS="\
---lora_rank 32 \
---lora_alpha 64 \
+--lora_rank 128 \
+--lora_alpha 256 \
 --lora_dropout 0.1 \
 --target_modules q_proj v_proj k_proj attn_out
 "
@@ -32,7 +32,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # === RUN ===
 deepspeed rlhf/train_dpo.py \
     --pretrain "$BASE_MODEL_PATH" \
-    --dataset stanfordnlp/SHP \
+    --dataset nz/anthropic-hh-golden-rlhf \
     --dataset_probs 1.0 \
     --save_path "$OUTPUT_DIR" \
     --max_len "$MAX_LEN" \
@@ -50,7 +50,7 @@ deepspeed rlhf/train_dpo.py \
     --eval_steps -1 \
     --use_wandb dc953a73754e73f853a4148bed458100f5ed36f7\
     --wandb_project "LLada-Reasoning" \
-    --wandb_run_name "VRPO_lora" \
+    --wandb_run_name "VRPO_lora_hh_golden_rlhf" \
     --gradient_checkpointing \
     $BF16 \
     $FLASH \

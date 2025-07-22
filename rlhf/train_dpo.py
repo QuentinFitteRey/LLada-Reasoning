@@ -18,7 +18,8 @@ import torch
 from peft import PeftModel, PeftConfig, LoraConfig, get_peft_model_state_dict, set_peft_model_state_dict, get_peft_model
 import os
 os.environ["MASTER_PORT"] = "42000"
-
+import re
+ADAPTER_PATH = os.path.expanduser("~/scratch/LLada-Reasoning/dpo_checkpoints_lora/_SHP_2_lora_ckpt_400")
 def init_model(args):
     """
     Initializes and returns the base model and tokenizer.
@@ -70,7 +71,7 @@ def train(args):
     )
     # 3. Apply LoRA adapters to create the PEFT model
     peft_model = get_peft_model(base_model, lora_config)
-    
+    # peft_model = PeftModel.from_pretrained(peft_model, ADAPTER_PATH, lora_config=lora_config)
     # 4. Wrap the PEFT model in your Actor class
     model = Actor(
         peft_model,
@@ -101,7 +102,7 @@ def train(args):
 
     # gradient_checkpointing
     if args.gradient_checkpointing:
-        strategy.print("\n\n\n\nEnable gradient checkpointing\n\n\n\n")
+        strategy.print("Enable gradient checkpointing")
         model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
         )
@@ -118,7 +119,7 @@ def train(args):
         max_count=args.max_samples,
         dataset_split=args.dataset_split,
     )
-    def map_shp_preformatted_prompt(example, tokenizer, max_len=4000):
+    def map_shp_preformatted_prompt(example, tokenizer, max_len=4096):
         """
         Pre-formats the prompt according to the chat template and filters out long examples.
         """
@@ -154,13 +155,81 @@ def train(args):
             "chosen": chosen_response.strip() + "<|eot_id|>",
             "rejected": rejected_response.strip() + "<|eot_id|>"
         }
+    
+    import re
+
+    def map_hh_rlhf_dpo(example, tokenizer, max_len=4096):
+        chosen_full_text = example["chosen"]
+        rejected_full_text = example["rejected"]
+
+        # Extract shared prompt and responses
+        split_chosen = chosen_full_text.rsplit("\n\nAssistant:", 1)
+        split_rejected = rejected_full_text.rsplit("\n\nAssistant:", 1)
+
+        if len(split_chosen) != 2 or len(split_rejected) != 2:
+            return None  # skip malformed examples
+
+        prompt_text = split_chosen[0]
+        chosen_response = split_chosen[1].strip()
+        rejected_response = split_rejected[1].strip()
+
+        # Match sequences of form "\n\nHuman: ..." or "\n\nAssistant: ..."
+        # and extract all roles and their messages in order
+        pattern = r"(Human|Assistant):\s*(.*?)(?=\n\n(?:Human|Assistant):|\Z)"
+        matches = re.findall(pattern, prompt_text, re.DOTALL)
+
+        # Convert to chat template format
+        messages = []
+        for role, content in matches:
+            role_tag = "user" if role == "Human" else "assistant"
+            messages.append({"role": role_tag, "content": content.strip()})
+
+        # Format the prompt using tokenizer's chat template
+        formatted_prompt = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+        # Append <eos> to each response
+        chosen_final = chosen_response + tokenizer.eos_token
+        rejected_final = rejected_response + tokenizer.eos_token
+
+        # Length filtering
+        chosen_len = len(tokenizer(formatted_prompt + chosen_final, add_special_tokens=False)["input_ids"])
+        rejected_len = len(tokenizer(formatted_prompt + rejected_final, add_special_tokens=False)["input_ids"])
+        if chosen_len > max_len or rejected_len > max_len:
+            return None
+
+        return {
+            "prompt": formatted_prompt,
+            "chosen": chosen_final,
+            "rejected": rejected_final,
+        }
+
+    def map_hh_golden_rlhf(example, tokenizer, max_len=4096):
+        """
+        Maps the example to the format expected by the DPO trainer.
+        """
+        chosen_full_text = example["chosen"]
+        rejected_full_text = example["rejected"]
+        prompt_text = example["prompt"]
+        
+        chosen_len = len(tokenizer(prompt_text + chosen_full_text, add_special_tokens=False)["input_ids"])
+        rejected_len = len(tokenizer(prompt_text + rejected_full_text, add_special_tokens=False)["input_ids"])
+        if chosen_len > max_len or rejected_len > max_len:
+            return None
+        return {
+            "prompt": prompt_text,
+            "chosen": chosen_full_text,
+            "rejected": rejected_full_text,
+        }
+
 
 
     train_data = train_data.map(
-        partial(map_shp_preformatted_prompt, tokenizer=tokenizer),
+        partial(map_hh_golden_rlhf, tokenizer=tokenizer),
         remove_columns=train_data.column_names
     ).filter(lambda x: x is not None)
-
+    # print(f"first sample: {train_data[0]}")
     train_data = train_data.select(range(min(args.max_samples, len(train_data))))
     train_dataset = RewardDataset(
         train_data,
@@ -340,7 +409,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_split", type=str, default="test")
     parser.add_argument("--max_samples", type=int, default=1000000, help="Maximum number of samples to use")
 
-    parser.add_argument("--prompt_key", type=str, default=None)
+    parser.add_argument("--prompt_key", type=str, default="prompt")
     parser.add_argument("--chosen_key", type=str, default="chosen")
     parser.add_argument("--rejected_key", type=str, default="rejected")
     parser.add_argument("--input_template", type=str, default=None)

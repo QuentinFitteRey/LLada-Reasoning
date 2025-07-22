@@ -94,7 +94,7 @@ class Actor(nn.Module):
         # --- END MODIFICATION ---
 
         if not final_loss_mask.any():
-            return torch.zeros(b, device=dev)
+            return (logits.sum() * 0.0).expand(b)
 
         log_probs = F.log_softmax(logits / self.temperature, dim=-1)
         log_p_theta_at_targets = log_probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
@@ -114,7 +114,7 @@ class Actor(nn.Module):
         dev = input_ids.device
         if l == 0:
             return torch.zeros(b, device=dev), None
-
+        prompt_id_lens = prompt_id_lens.to(dev)
         # --- MODIFIED: Un-mask the prompt ---
         # 1. Create the noisy input from the boolean mask
         noisy_input = torch.where(masked_indices, self.mask_id, input_ids)
