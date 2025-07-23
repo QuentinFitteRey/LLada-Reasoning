@@ -16,8 +16,7 @@ from lm_eval.api.registry import register_model
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer, AutoModel
-from new_generation_quentin import generate_with_dual_cache
-from generate import generate
+from fixed_generation_dual_cache import generate_with_dual_cache
 from init_model import init_model
 from accelerate import Accelerator
 
@@ -99,22 +98,23 @@ class LLaDAEvalHarness(LM):
             model_path=self.model_path,
             adapter_path=self.adapter_path,
             load_lora=self.load_lora,
-            device=device,
+            # device=device,
             torch_dtype=torch.bfloat16,
         )
-        model = model.to(device)
+        # model = model.to(device)
         self.model = model
         self.tokenizer = tokenizer
         self.model.eval()
 
-        self.device = torch.device(device)
+        # self.device = torch.device(device)
         if self.accelerator is not None:
             self.model = self.accelerator.prepare(self.model)
             self.device = torch.device(f'{self.accelerator.device}')
             self._rank = self.accelerator.local_process_index
             self._world_size = self.accelerator.num_processes
-        else: 
-            self.model = self.model.to(device)
+        else:
+            self.device = torch.device(device)
+            self.model = self.model.to(self.device)
 
         self.mask_id = mask_id
 
@@ -252,6 +252,18 @@ class LLaDAEvalHarness(LM):
         ds = ds.with_format("torch")
         prompt_len = [len(x["prefix"]) + len(x["target"]) for x in ds]
 
+        # Truncate sequences longer than max_length (not filtering)
+        if max(prompt_len) > 4096:
+            print(f"[Warning] Some sequences are longer than 4096 tokens, truncating to 4096.")
+            ds = ds.map(
+                lambda x: {
+                    "prefix": x["prefix"][:4096],
+                    "target": x["target"][:4096 - len(x["prefix"])],
+                },
+                batched=False,
+            )
+            prompt_len = [len(x["prefix"]) + len(x["target"]) for x in ds]
+
         assert max(prompt_len) <= 4096
 
         out = []
@@ -309,6 +321,7 @@ class LLaDAEvalHarness(LM):
 
     def generate_until(self, requests: list[Instance]):
 
+        # thinking_mode = """"""
         thinking_mode = """You must think step by step and provide detailed thinking on the problem before giving the final answer.\nYou must put your thinking process between <think> and </think> tags and then output the final answer with a summary of your thinking process.\nIn your thinking process, this requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop a well-considered thinking process."""
         not_thinking_mode = """You are not required to have detailed thinking on the problem between <think> and </think> tags.\nYou can provide a direct answer to the question without detailed thinking.\nYou can still take steps to solve the problem, but you do not need to provide detailed thinking on the problem."""
         use_thinking = True
@@ -359,8 +372,20 @@ class LLaDAEvalHarness(LM):
                 block_length=self.block_length,
                 temperature=0.0,
                 remasking="low_confidence",
-                threshold=0.8
+                threshold=0.9,
+                repetition_penalty=1.2,
             )
+
+            # # 3) normal generation
+            # generated_ids = generate(
+            #     self.model,
+            #     prompt,
+            #     steps=self.steps,
+            #     gen_length=self.gen_length,
+            #     block_length=self.block_length,
+            #     temperature=0.0,
+            #     remasking="low_confidence",
+            # )
 
             # print(f"--- Debug Info for Request ---")
             # print(f"Prompt shape: {prompt.shape}")
@@ -435,7 +460,7 @@ class LLaDAEvalHarness(LM):
                     else:
                         print(f"[Warning] No valid A-Z answer found in generated text for MMLU task:\n{clean}", file=sys.stderr)
 
-            elif self.task.startswith("gsm8k"):
+            elif self.task.startswith("gsm8k") and False:  # WIP: Removed for the moment
                 # --- STAGE 1: Strict pattern match ---
                 match = re.search(
                     r"(?:####\s*|"
