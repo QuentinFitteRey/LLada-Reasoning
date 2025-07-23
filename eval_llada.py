@@ -373,7 +373,7 @@ class LLaDAEvalHarness(LM):
                 temperature=0.0,
                 remasking="low_confidence",
                 threshold=0.9,
-                repetition_penalty=1.2,
+                repetition_penalty=1.0,
             )
 
             # # 3) normal generation
@@ -419,7 +419,7 @@ class LLaDAEvalHarness(LM):
             # print(clean, file=sys.stderr)
             # print("------ ANSWER END -----", file=sys.stderr)
 
-            if self.task.startswith("mmlu"):
+            if self.task.startswith("mmlu") and False:  # WIP: MMLU answer extraction
                 # --- STAGE 1: Strict / structured matches ---
                 primary_matches = re.findall(
                     r"(?:The (?:best )?answer is\s*\\boxed\{([A-Z])\}|"        # The best answer is \boxed{B}
@@ -495,7 +495,7 @@ class LLaDAEvalHarness(LM):
                     else:
                         print(f"[Warning] No numeric answer found in GSM8K output:\n{clean}", file=sys.stderr)
 
-            elif self.task == "hendrycks_math": # WIP: Very bad rn
+            elif self.task == "hendrycks_math" and False: # WIP: Very bad rn
                 # find all $…$ spans
                 dollars = [i for i,ch in enumerate(text) if ch=='$']
                 if len(dollars)>=2:

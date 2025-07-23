@@ -19,4 +19,4 @@ export PYTHONPATH=$(pwd)
 
 nvidia-smi
 
-srun python new_generation.py
+srun python fixed_generation_dual_cache.py

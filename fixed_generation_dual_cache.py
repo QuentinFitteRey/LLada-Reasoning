@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from typing import Optional
-
+from init_model import init_model
 
 def add_gumbel_noise(logits: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
     if temperature == 0:
@@ -42,9 +42,16 @@ def generate_with_dual_cache(
     """
     Dual-cache generation: block-wise sampling with classifier-free guidance and repetition penalty.
     """
-    prompt_len = prompt.shape[1]
+    batch_size, prompt_len = prompt.shape
     total_len = prompt_len + gen_length
-    x = torch.full((1, total_len), mask_id, dtype=torch.long, device=prompt.device)
+
+    # <-- change here to use batch_size -->
+    x = torch.full(
+        (batch_size, total_len),
+        mask_id,
+        dtype=torch.long,
+        device=prompt.device
+    )
     x[:, :prompt_len] = prompt
 
     assert gen_length % block_length == 0, "gen_length must be divisible by block_length"
@@ -180,3 +187,122 @@ def get_transfer_index(
                 if confidence[i, idxs[j]] < threshold:
                     transfer[i, idxs[j]] = False
     return x0, transfer
+
+# def main():
+#     device = 'cuda'
+#     model, tokenizer = init_model(
+#         model_path    = "/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5",
+#         adapter_path  = "/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/final/final/sft_adapter",
+#         load_lora     = True,
+#         device        = device,
+#     )
+#     model = model.to(device)
+
+#     # 1) Define your four prompts
+#     prompts = [
+#         "A number consists of two digits. The digit in the tens place is three times the digit in the units place. If you reverse the digits, the new number is 36 less than the original number. What is the original number?",
+#         "Explain how a Kalman filter works in the context of object tracking.",
+#         "Describe the process of fine‑tuning a CLIP model with LoRA on a small dataset.",
+#         "What are the key benefits of using Yarn rotary embeddings over vanilla RoPE?",
+#     ]
+
+#     # Artificially make the batch size 8
+#     prompts = prompts * 2  # Repeat to make batch size 8
+
+#     # 2) Apply chat template to each, then batch‑tokenize (with padding)
+#     wrapped = []
+#     for p in prompts:
+#         msg = [{"role":"user","content": p}]
+#         wrapped.append(
+#             tokenizer.apply_chat_template(msg, add_generation_prompt=True, tokenize=False)
+#         )
+#     batch = tokenizer(
+#         wrapped,
+#         padding=True,
+#         return_tensors="pt",
+#     )
+#     input_ids = batch["input_ids"].to(device)
+
+#     # 3) Measure generation time
+#     t0 = torch.cuda.Event(enable_timing=True)
+#     t1 = torch.cuda.Event(enable_timing=True)
+#     t0.record()
+#     out, nfe = generate_with_dual_cache(
+#         model,
+#         input_ids,
+#         steps=256,
+#         gen_length=256,
+#         block_length=16,
+#         temperature=0.0,
+#         remasking='low_confidence',
+#         threshold=0.9,
+#         repetition_penalty=1.2,
+#     )
+#     t1.record()
+#     torch.cuda.synchronize()
+#     elapsed = t0.elapsed_time(t1) / 1000.0
+#     print(f"Generation time: {elapsed:.2f}s, NFE: {nfe}")
+
+#     # 4) Decode and print each result
+#     gens = tokenizer.batch_decode(
+#         out[:, input_ids.shape[1]:],
+#         skip_special_tokens=False
+#     )
+#     for i, text in enumerate(gens, start=1):
+#         print(f"\n=== Prompt {i} ===\n{prompts[i-1]}\n\n→ Generation:\n{text}")
+
+def main():
+    device = 'cuda'
+    model, tokenizer = init_model(
+        model_path    = "/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5",
+        adapter_path  = "/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/final/final/sft_adapter",
+        load_lora     = True,
+        device        = device,
+    )
+    model = model.to(device)
+
+    # single “template” prompt to replicate
+    single = "A number consists of two digits. The digit in the tens place is three times the digit in the units place. If you reverse the digits, the new number is 36 less than the original number. What is the original number?"
+    batch_sizes = [1, 2, 4, 8, 16, 32, 64]
+
+    print(f"{'batch':>5}  {'time (s)':>8}  {'NFE':>4}")
+    print("-" * 24)
+
+    for bs in batch_sizes:
+        # build batch of size bs
+        prompts = [single] * bs
+        wrapped = [
+            tokenizer.apply_chat_template(
+                [{"role":"user","content":p}],
+                add_generation_prompt=True,
+                tokenize=False
+            )
+            for p in prompts
+        ]
+        enc = tokenizer(wrapped, padding=True, return_tensors="pt")
+        input_ids = enc["input_ids"].to(device)
+
+        # time it
+        t0 = torch.cuda.Event(enable_timing=True)
+        t1 = torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize()
+        t0.record()
+        out, nfe = generate_with_dual_cache(
+            model,
+            input_ids,
+            steps=256,
+            gen_length=256,
+            block_length=16,
+            temperature=0.0,
+            remasking='low_confidence',
+            threshold=0.9,
+            repetition_penalty=1.2,
+        )
+        t1.record()
+        torch.cuda.synchronize()
+        elapsed = t0.elapsed_time(t1) / 1000.0
+
+        print(f"{bs:5d}  {elapsed:8.3f}  {nfe:4d}")
+
+if __name__ == '__main__':
+    main()
