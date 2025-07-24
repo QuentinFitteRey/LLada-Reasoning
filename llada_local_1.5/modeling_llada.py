@@ -828,14 +828,20 @@ class LLaDABlock(nn.Module):
                 # Get the indices that need to be replaced
                 replace_indices = replace_position.nonzero(as_tuple=True)[1]  # [selected_length]
                 # Use scatter operation to perform replacement
-                for b in range(B):
-                    idxs = replace_position[b].nonzero(as_tuple=True)[0]   # e.g. [16] indices
-                    past_key[b, :, idxs] = k[b]                          # shapes now line up
+                # for b in range(B):
+                #     idxs = replace_position[b].nonzero(as_tuple=True)[0]   # e.g. [16] indices
+                #     past_key[b, :, idxs] = k[b]                          # shapes now line up
+                # k = past_key
+                # # Perform the same operation for value
+                # for b in range(B):
+                #     idxs = replace_position[b].nonzero(as_tuple=True)[0]
+                #     past_value[b, :, idxs] = v[b]
+                # v = past_value
+                # new, fully vectorized
+                idxs = replace_position[0].nonzero(as_tuple=True)[0]     # e.g. torch.arange(start,end)
+                past_key  [:, :, idxs] = k.to(past_key.dtype)  # past_key shape is [B, n_kv_h, selected_length, hs]
+                past_value[:, :, idxs] = v.to(past_value.dtype)  # past_value shape is [B, n_kv_h, selected_length, hs]
                 k = past_key
-                # Perform the same operation for value
-                for b in range(B):
-                    idxs = replace_position[b].nonzero(as_tuple=True)[0]
-                    past_value[b, :, idxs] = v[b]
                 v = past_value
 
         present = (k, v) if use_cache else None #present: None

@@ -16,7 +16,7 @@ SBATCH_OPTS="
   --nodes=1
   --ntasks-per-node=1
   --gres=gpu:H200:4
-  --time=4:00:00
+  --time=2:00:00
   --mem=1024G
   --cpus-per-task=8
   --tmp=1000G
@@ -48,7 +48,7 @@ TASKS=( \
 # -----------------------------
 DEFAULT_LIMIT=512
 DEFAULT_FEWSHOT=5
-DEFAULT_BATCHSIZE=1
+DEFAULT_BATCHSIZE=8
 DEFAULT_CONFIRM_UNSAFE=""      # e.g. "--confirm_run_unsafe_code"
 DEFAULT_MODEL_ARGS="model_path=/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5,cfg=0.,is_check_greedy=False,mc_num=128,gen_length=256,steps=256,block_length=16,temperature=0.0"
 # MODEL_PATH="/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/merged_pretrained_model/merged_model_good_base"

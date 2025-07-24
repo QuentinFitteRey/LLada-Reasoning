@@ -56,6 +56,7 @@ class LLaDAEvalHarness(LM):
         block_length=128,
         remasking='low_confidence',
         device="cuda",
+        generate_batch_size=8,
         **kwargs,
     ):
         '''
@@ -80,6 +81,7 @@ class LLaDAEvalHarness(LM):
         self.adapter_path = adapter_path
         self.load_lora = load_lora
         self.task = os.environ.get("EVAL_TASKS", None)
+        self.generate_batch_size = generate_batch_size
 
         accelerator = accelerate.Accelerator()
         if accelerator.num_processes > 1:
@@ -319,7 +321,7 @@ class LLaDAEvalHarness(LM):
             "until": e["until"],
         }
 
-    def generate_until(self, requests: list[Instance]):
+    def generate_until_not_batched(self, requests: list[Instance]):
 
         # thinking_mode = """"""
         thinking_mode = """You must think step by step and provide detailed thinking on the problem before giving the final answer.\nYou must put your thinking process between <think> and </think> tags and then output the final answer with a summary of your thinking process.\nIn your thinking process, this requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop a well-considered thinking process."""
@@ -510,6 +512,89 @@ class LLaDAEvalHarness(LM):
 
             if self.accelerator is not None:
                 self.accelerator.wait_for_everyone()
+
+        return out
+    
+    def generate_until(self, requests: list[Instance]):
+        
+        # thinking_mode = """"""
+        thinking_mode = """You must think step by step and provide detailed thinking on the problem before giving the final answer.\nYou must put your thinking process between <think> and </think> tags and then output the final answer with a summary of your thinking process.\nIn your thinking process, this requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop a well-considered thinking process."""
+        not_thinking_mode = """You are not required to have detailed thinking on the problem between <think> and </think> tags.\nYou can provide a direct answer to the question without detailed thinking.\nYou can still take steps to solve the problem, but you do not need to provide detailed thinking on the problem."""
+        use_thinking = True
+
+        if requests:
+            self.task = getattr(requests[0], "task_name", "unknown")
+
+        print(f"[LLaDAEvalHarness] Generating with task: {self.task}")
+
+        ds = [{"question": req.args[0], "until": req.args[1]['until']} for req in requests]
+        ds = Dataset.from_list(ds)
+        ds = ds.map(
+            self.llada_generate_until_tokenize,
+            fn_kwargs={"tokenizer": self.tokenizer},
+            batched=False,
+            with_indices=True,
+        )
+        ds = ds.with_format("torch")
+
+        # ——————————————————————————————
+        # BATCHED VERSION
+        all_prompts: list[list[int]] = []
+        raw_texts: list[str]     = []
+        for elem in ds:
+            # reconstruct your engineered prompt here
+            if use_thinking:
+                q = f"{thinking_mode}\n{elem['question_text']}"
+            else:
+                q = f"{not_thinking_mode}\n{elem['question_text']}"
+            prompt_str = self.tokenizer.apply_chat_template(
+                [{"role":"user","content": q}],
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            ids = self.tokenizer(prompt_str)["input_ids"]
+            all_prompts.append(ids)
+            raw_texts.append(prompt_str)
+
+        out = []
+        for i in range(0, len(all_prompts), self.generate_batch_size):
+            batch_ids = all_prompts[i : i + self.generate_batch_size]
+
+            # pad to max length in this batch
+            max_len = max(len(x) for x in batch_ids)
+            pad_id  = self.tokenizer.pad_token_id or 0
+            batch_tensor = torch.full(
+                (len(batch_ids), max_len),
+                pad_id,
+                device=self.device,
+                dtype=torch.long,
+            )
+            for j, ids in enumerate(batch_ids):
+                batch_tensor[j, : len(ids)] = torch.tensor(ids, device=self.device)
+
+            # one batched call
+            generated, _ = generate_with_dual_cache(
+                self.model,
+                batch_tensor,
+                steps=self.steps,
+                gen_length=self.gen_length,
+                block_length=self.block_length,
+                temperature=0.0,
+                remasking=self.remasking,
+                # threshold=0.9,
+                repetition_penalty=1.0,
+            )
+
+            # extract each example’s generation
+            for j, prompt_ids in enumerate(batch_ids):
+                gen_part = generated[j, len(prompt_ids) :]
+                text = self.tokenizer.decode(gen_part, skip_special_tokens=False)
+                # trim at stop token
+                if "<|eot_id|>" in text:
+                    text = text[: text.index("<|eot_id|>")]
+                final_ids = self.tokenizer(text)["input_ids"]
+                clean = self.tokenizer.decode(final_ids, skip_special_tokens=True)
+                out.append(clean)
 
         return out
 
