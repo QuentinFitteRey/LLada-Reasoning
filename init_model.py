@@ -9,7 +9,7 @@ def init_model(lora=False):
     local_model_tokenizer_path = "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-600"
 
     print(f"Loading tokenizer from: {local_model_tokenizer_path}")
-    tokenizer = AutoTokenizer.from_pretrained(local_model_tokenizer_path, use_fast=True, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(local_model_path, use_fast=True, local_files_only=True)
 
     print(f"Loading modified model from: {local_model_path}")
     model = AutoModelForCausalLM.from_pretrained(

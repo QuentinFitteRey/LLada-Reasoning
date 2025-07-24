@@ -216,22 +216,26 @@ def generate(
 def main():
     device = 'cuda'
 
-    model, tokenizer = init_model(lora=True)
+    model, tokenizer = init_model(lora=False)
     model = model.to(device)
 
     # Plain text prompt for base model
     prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she runs 6 kilometers per hour. To do 8 km she is running "
     #prompt = "Albert Einstein was born in Ulm, Germany, on"
     # Tokenize the prompt directly
-    input_ids = tokenizer(prompt, return_tensors="pt")['input_ids'].to(device)
+    m = [{"role": "user", "content": prompt}, ]
+    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+
+    input_ids = tokenizer(prompt)['input_ids']
+    input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
 
     # Generate output
     out = generate(
         model,
         input_ids,
-        steps=4096,
-        gen_length=4096,
-        block_length=64,
+        steps=128,
+        gen_length=128,
+        block_length=16,
         temperature=0.0,
         cfg_scale=0.0,
         remasking='low_confidence'

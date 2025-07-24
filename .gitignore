@@ -210,3 +210,5 @@ sft_data/
 validation/
 eval_logs/
 evaluate_logs/
+filtered_conversational_dataset/
+filtered_conversational_dataset_4k/

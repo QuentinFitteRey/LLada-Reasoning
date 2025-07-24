@@ -35,14 +35,6 @@ class SFTDataset(Dataset):
 
         user_message = {"role": "user", "content": ex['user']}
         assistant_message = {"role": "assistant", "content": ex['assistant']}
-        # find the string inside user_message['content'] that says detailed thinking on and a point at the end
-        thinking_mode= "You must perform a detailed, step-by-step thinking process to solve the problem. Your thinking should be a comprehensive cycle of analysis, exploration, and self-correction. Engage in reflection, back-tracing to refine errors, and iteration to develop a well-considered path to the solution. Put this entire process between <think> and </think> tags. \nAfter the closing </think> tag, present your final answer. Your answer should begin with the conclusion, followed by a brief summary that explains how you arrived at it by referencing the key steps from your thinking process.\n"
-        not_thinking_mode = "You are not required to have detailed thinking on the problem between <think> and </think> tags. \nYou can provide a direct answer to the question without detailed thinking. \nYou can still take steps to solve the problem, but you do not need to provide detailed thinking on the problem.\n"
-
-        if 'detailed thinking on' in user_message['content']:
-            user_message['content'] = user_message['content'].replace('detailed thinking on', thinking_mode)
-        elif 'detailed thinking off' in user_message['content']:
-            user_message['content'] = user_message['content'].replace('detailed thinking off', not_thinking_mode)
         prompt_ids = self.tokenizer.apply_chat_template(
             [user_message],
             tokenize=True,
@@ -109,20 +101,19 @@ def calc_sft_loss(model, batch, mask_id, pad_id, eps, think_end_id, answer_weigh
     loss_mask = ans_mask & masked_pos & (ids != pad_id)
     if not loss_mask.any(): return None, 0.0
 
-    is_answer_token_mask = torch.cumsum((ids == think_end_id), dim=1) > 0
+    # is_answer_token_mask = torch.cumsum((ids == think_end_id), dim=1) > 0
 
-    weights = torch.ones(b, l, device=dev)
-    weights[is_answer_token_mask] = answer_weight
+    # weights = torch.ones(b, l, device=dev)
+    # weights[is_answer_token_mask] = answer_weight
 
     loss = F.cross_entropy(logits[loss_mask], ids[loss_mask], reduction='none')
     norm_loss = loss / p_mask[loss_mask]
-    weighted_loss = norm_loss * weights[loss_mask]
 
     total_ans_toks = torch.sum(ans_mask.int(), dim=1).sum()
     if total_ans_toks == 0:
         return None, 0.0
 
-    final_loss = weighted_loss.sum() / total_ans_toks
+    final_loss = norm_loss.sum() / total_ans_toks
     return final_loss, final_loss.item()
 
 
@@ -148,7 +139,7 @@ def main():
     parser = argparse.ArgumentParser(description='SFT for LLaDA with Multi-Stage LoRA')
     # Model and Data Paths
     parser.add_argument('--pretrained-model', type=str, default="./merged_model_good_base", help="Path to the base Hugging Face model.")
-    parser.add_argument('--sft-data', type=str, default='./sft_data/nemotron_sft_sample', help='Path to SFT DatasetDict.')
+    parser.add_argument('--sft-data', type=str, default='./filtered_conversational_dataset/', help='Path to SFT DatasetDict.')
     parser.add_argument('--output-dir', type=str, default='./checkpoints/checkpoints_llada_nemotron_pretrain', help='Directory to save checkpoints and logs.')
     parser.add_argument('--pretraining-lora-weights', type=str, default=None, help="Optional: Path to non-trainable LoRA weights from pre-training stage.")
     parser.add_argument('--sft-lora-weights', type=str, default=None, help="Optional: Path to trainable LoRA weights from a previous SFT run to continue training.")
@@ -167,7 +158,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=2)
     parser.add_argument('--lr', type=float, default=2e-5)
     parser.add_argument('--weight-decay', type=float, default=0.1)
-    parser.add_argument('--warmup-steps', type=int, default=50)
+    parser.add_argument('--warmup-ratio', type=float, default=0.1) # Changed to ratio
     parser.add_argument('--min-lr-ratio', type=float, default=0.1)
     parser.add_argument('--grad-clip-norm', type=float, default=1.0)
     # NEW: Argument for eps-based dynamic masking
@@ -224,8 +215,9 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model, use_fast=True)
     special_tokens_to_add = {
-        "additional_special_tokens": ["<|mdm_mask|>", "<think>", "</think>", "<|start_header_id|>", "<|end_header_id|>","<|eot_id|>"]
+        "additional_special_tokens": ["<|mdm_mask|>", "<|start_header_id|>", "<|end_header_id|>","<|eot_id|>","<|begin_of_thought|>","<|end_of_thought|>" "<|begin_of_solution|>", "<|end_of_solution|>"]
     }
+
     if tokenizer.pad_token is None:
         special_tokens_to_add["pad_token"] = "<|pad|>"
     tokenizer.add_special_tokens(special_tokens_to_add)
@@ -276,19 +268,27 @@ def main():
     model = DDP(model, device_ids=[int(os.environ["LOCAL_RANK"])])
 
     train_ds= SFTDataset(load_from_disk(args.sft_data)["train"], tokenizer=tokenizer, max_length=args.seq_len)
-    val_ds = SFTDataset(load_from_disk(args.sft_data)["validation"], tokenizer=tokenizer, max_length=args.seq_len)
+    val_ds = SFTDataset(load_from_disk(args.sft_data)["test"], tokenizer=tokenizer, max_length=args.seq_len)
     collator = SFTDataCollator(tokenizer)
     train_sampler = DistributedSampler(train_ds, rank=rank, num_replicas=world_size, shuffle=True)
     train_loader = DataLoader(train_ds, batch_size=args.local_batch, sampler=train_sampler, collate_fn=collator)
     val_sampler = DistributedSampler(val_ds, rank=rank, num_replicas=world_size, shuffle=False)
     val_loader = DataLoader(val_ds, batch_size=args.local_batch, sampler=val_sampler, collate_fn=collator)
 
-    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()), 
+        lr=args.lr, 
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.999),  # <-- Add this
+        eps=1e-08             # <-- Add this
+    )
     accum_steps = args.batch_size // (args.local_batch * world_size)
     total_steps = (len(train_loader) // accum_steps) * args.epochs
+    warmup_steps = int(total_steps * args.warmup_ratio) 
+    if is_main: print(f"Total steps: {total_steps}, Warmup steps: {warmup_steps}")
     def lr_fn(step):
-        if step < args.warmup_steps: return float(step) / float(max(1, args.warmup_steps))
-        p = (step - args.warmup_steps) / (total_steps - args.warmup_steps)
+        if step < warmup_steps: return float(step) / float(max(1, warmup_steps)) # Use new variable
+        p = (step - warmup_steps) / (total_steps - warmup_steps)
         return max(args.min_lr_ratio, 0.5 * (1.0 + math.cos(math.pi * p)))
     scheduler = LambdaLR(optimizer, lr_fn)
 
