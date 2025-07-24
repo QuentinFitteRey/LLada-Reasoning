@@ -541,7 +541,7 @@ class LLaDAEvalHarness(LM):
         # BATCHED VERSION
         all_prompts: list[list[int]] = []
         raw_texts: list[str]     = []
-        for elem in ds:
+        for elem in tqdm(ds, desc="Preparing prompts..."):
             # reconstruct your engineered prompt here
             if use_thinking:
                 q = f"{thinking_mode}\n{elem['question_text']}"
@@ -557,25 +557,23 @@ class LLaDAEvalHarness(LM):
             raw_texts.append(prompt_str)
 
         out = []
-        for i in range(0, len(all_prompts), self.generate_batch_size):
-            batch_ids = all_prompts[i : i + self.generate_batch_size]
+        for i in tqdm(range(0, len(all_prompts), self.generate_batch_size), desc="Generating..."):
+            batch_texts = raw_texts[i : i + self.generate_batch_size]
 
-            # pad to max length in this batch
-            max_len = max(len(x) for x in batch_ids)
-            pad_id  = self.tokenizer.pad_token_id or 0
-            batch_tensor = torch.full(
-                (len(batch_ids), max_len),
-                pad_id,
-                device=self.device,
-                dtype=torch.long,
+            # this will give you input_ids padded to the longest in the batch
+            enc = self.tokenizer(
+                batch_texts,
+                padding=True,               # pad to longest
+                return_tensors="pt",        # give PyTorch tensors
+                add_special_tokens=False    # we already called apply_chat_template
             )
-            for j, ids in enumerate(batch_ids):
-                batch_tensor[j, : len(ids)] = torch.tensor(ids, device=self.device)
+            input_ids    = enc["input_ids"].to(self.device)
+            attention_mask = enc.get("attention_mask", None)
 
             # one batched call
             generated, _ = generate_with_dual_cache(
                 self.model,
-                batch_tensor,
+                input_ids,
                 steps=self.steps,
                 gen_length=self.gen_length,
                 block_length=self.block_length,
@@ -585,15 +583,26 @@ class LLaDAEvalHarness(LM):
                 repetition_penalty=1.0,
             )
 
-            # extract each example’s generation
-            for j, prompt_ids in enumerate(batch_ids):
-                gen_part = generated[j, len(prompt_ids) :]
-                text = self.tokenizer.decode(gen_part, skip_special_tokens=False)
-                # trim at stop token
+            # 4) extract each example’s generation
+            #    we find out how many real (non‑pad) tokens there were
+            if attention_mask is not None:
+                prompt_lens = attention_mask.sum(dim=1)
+            else:
+                prompt_lens = torch.tensor([input_ids.shape[1]] * input_ids.shape[0],
+                                        device=input_ids.device)
+
+            for j, plen in enumerate(prompt_lens):
+                start = plen.item()
+                gen_ids = generated[j, start:]
+                text = self.tokenizer.decode(gen_ids, skip_special_tokens=False)
+
+                # trim at your stop token
                 if "<|eot_id|>" in text:
                     text = text[: text.index("<|eot_id|>")]
+
+                # (optional) re‑tokenize+decode to strip any stray special tokens
                 final_ids = self.tokenizer(text)["input_ids"]
-                clean = self.tokenizer.decode(final_ids, skip_special_tokens=True)
+                clean     = self.tokenizer.decode(final_ids, skip_special_tokens=True)
                 out.append(clean)
 
         return out

@@ -827,7 +827,11 @@ class LLaDABlock(nn.Module):
                 # Replace selected_length number of 1s in past_key with k
                 # Get the indices that need to be replaced
                 replace_indices = replace_position.nonzero(as_tuple=True)[1]  # [selected_length]
-                # Use scatter operation to perform replacement
+                
+                # print(f"replace_position: {replace_position.shape}\n\n{replace_position}")
+                # print(f"replace_indices: {replace_indices.shape}\n\n{replace_indices}")
+                # print(f"replace_indices.max(): {replace_indices.max()}")
+                # # Use scatter operation to perform replacement
                 # for b in range(B):
                 #     idxs = replace_position[b].nonzero(as_tuple=True)[0]   # e.g. [16] indices
                 #     past_key[b, :, idxs] = k[b]                          # shapes now line up
@@ -837,12 +841,20 @@ class LLaDABlock(nn.Module):
                 #     idxs = replace_position[b].nonzero(as_tuple=True)[0]
                 #     past_value[b, :, idxs] = v[b]
                 # v = past_value
-                # new, fully vectorized
-                idxs = replace_position[0].nonzero(as_tuple=True)[0]     # e.g. torch.arange(start,end)
-                past_key  [:, :, idxs] = k.to(past_key.dtype)  # past_key shape is [B, n_kv_h, selected_length, hs]
-                past_value[:, :, idxs] = v.to(past_value.dtype)  # past_value shape is [B, n_kv_h, selected_length, hs]
-                k = past_key
-                v = past_value
+
+                # mask: [B, n_kv_h, L]
+                mask = replace_position.unsqueeze(1).expand(-1, self.config.effective_n_kv_heads, -1)
+                # overwrite past_key where mask==1 with k
+                past_key = past_key.masked_scatter(
+                    mask.unsqueeze(-1),
+                    k.contiguous().view(-1, *k.shape[-2:], k.shape[-1])
+                )
+                # same for past_value
+                past_value = past_value.masked_scatter(
+                    mask.unsqueeze(-1),
+                    v.contiguous().view(-1, *v.shape[-2:], v.shape[-1])
+                )
+                k, v = past_key, past_value
 
         present = (k, v) if use_cache else None #present: None
         query_len, key_len = q.shape[-2], k.shape[-2]  # could be different if layer_past not None
@@ -853,6 +865,12 @@ class LLaDABlock(nn.Module):
                 q, k = self.rotary_emb(q, k)
             else:
                 q, k = self.rotary_emb(q, k, replace_indices.max()+1)
+        elif getattr(self.config, "yarn", False):
+            # YarnRoPE needs seq_len_override kwarg
+            if replace_position is None:
+                q, k = self.rotary_emb(q, k)
+            else:
+                q, k = self.rotary_emb(q, k, seq_len_override=replace_indices.max()+1)
 
         if attention_bias is not None:
             # Resize and cast attention bias.

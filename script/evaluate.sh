@@ -46,11 +46,11 @@ TASKS=( \
 # -----------------------------
 # Default per‐task parameters
 # -----------------------------
-DEFAULT_LIMIT=512
+DEFAULT_LIMIT=64
 DEFAULT_FEWSHOT=5
-DEFAULT_BATCHSIZE=8
+DEFAULT_BATCHSIZE=4
 DEFAULT_CONFIRM_UNSAFE=""      # e.g. "--confirm_run_unsafe_code"
-DEFAULT_MODEL_ARGS="model_path=/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5,cfg=0.,is_check_greedy=False,mc_num=128,gen_length=256,steps=256,block_length=16,temperature=0.0"
+DEFAULT_MODEL_ARGS="model_path=/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5,cfg=0.,is_check_greedy=False,mc_num=128,gen_length=256,steps=256,block_length=16,temperature=0.0,generate_batch_size=${DEFAULT_BATCHSIZE}"
 # MODEL_PATH="/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/merged_pretrained_model/merged_model_good_base"
 # ADAPTER_PATH="/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/exp_quentin_1807/new_weights/step-2100/sft_adapter"
 # DEFAULT_MODEL_ARGS="model_path=${MODEL_PATH},adapter_path=${ADAPTER_PATH},load_lora=True,cfg=0.5,is_check_greedy=False,mc_num=5,gen_length=2048,steps=2048,block_length=128,temperature=0.0"
@@ -113,6 +113,8 @@ srun accelerate launch \
     ${CONFIRM} \
     --model_args '${MODEL_ARGS}' \
   "
+# Print the command for debugging
+  echo "Running command: $RUN_CMD"
 
   # submit with or without dependency
   if [ -z "$prev_jobid" ]; then
