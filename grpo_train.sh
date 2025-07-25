@@ -1,6 +1,10 @@
 #!/bin/bash
 set -x
 
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+conda activate ~/scratch/envs/llada
+
+
 # === PATHS ===
 BASE_MODEL_PATH="./llada_local_15"      # Your base model path (non-merged)
 OUTPUT_DIR="./grpo_checkpoints_lora"      # Where to save the trained GRPO LoRA adapter
@@ -61,7 +65,7 @@ deepspeed rlhf/train_grpo.py \
     --gradient_checkpointing \
     --use_wandb dc953a73754e73f853a4148bed458100f5ed36f7 \
     --wandb_project "LLada-Reasoning" \
-    --wandb_run_name "GRPO" \
+    --wandb_run_name "GRPO_training" \
     $BF16 \
     $FLASH \
     $LORA_ARGS \

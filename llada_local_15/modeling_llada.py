@@ -1747,6 +1747,10 @@ class LLaDAModelLM(PreTrainedModel):
             self.model = LLaDAModel(model_config, init_params=init_params)
         else:
             self.model = model
+        
+    def set_activation_checkpointing(self, strategy: Optional[ActivationCheckpointingStrategy]):
+        """Passes the activation checkpointing command to the core model."""
+        self.model.set_activation_checkpointing(strategy)
 
     def forward(
         self,
