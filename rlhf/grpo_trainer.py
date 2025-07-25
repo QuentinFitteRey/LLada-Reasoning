@@ -7,6 +7,8 @@ from openrlhf.utils.distributed_sampler import DistributedSampler
 from rlhf.grpo_loss import GRPOLoss
 from fixed_generation_dual_cache import generate_with_dual_cache
 
+SAVE_EVERY = 10
+
 class GRPOTrainer:
     """
     Final, corrected trainer for GRPO, faithfully replicating the Monte Carlo
@@ -108,6 +110,7 @@ class GRPOTrainer:
             self.ref_model.eval()
 
             for step_idx, batch in enumerate(self.train_dataloader):
+                print(f"Processing batch {step_idx + 1}/{len(self.train_dataloader)}")
                 generated_sequences, rewards, prompt_lens_tensor, _ = self._generate_and_score(batch)
                 attention_mask = (generated_sequences != self.pad_id).long()
                 expanded_prompt_lens = prompt_lens_tensor.repeat_interleave(self.num_samples_per_prompt)
@@ -152,18 +155,23 @@ class GRPOTrainer:
                     global_step = step // self.strategy.accumulated_gradient
                     client_states = {"consumed_samples": global_step * args.train_batch_size}
                     self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
+                    if global_step % SAVE_EVERY == 0 and self.strategy.is_rank_0():
+                        ckpt_path = os.path.join(self.strategy.args.save_path, f"_SHP_2_lora_ckpt_{global_step}")
+                        os.makedirs(ckpt_path, exist_ok=True)
+                        self.model.model.save_pretrained(ckpt_path)
+                        print(f"Saved LoRA checkpoint at step {global_step} to {ckpt_path}", flush=True)
                 
                 step += 1
             epoch_bar.update()
 
     def _generate_and_score(self, batch):
-        prompt = batch["prompt_texts"][0]
+        prompt = batch["prompt_texts"]
         prompt_ids = batch["prompt_ids"].to(torch.cuda.current_device())
         prompt_lens = batch["prompt_lens"].to(torch.cuda.current_device())
         prompt_tensor_len = prompt_ids.shape[1]
         
         expanded_prompt_ids = prompt_ids.repeat_interleave(self.num_samples_per_prompt, dim=0)
-
+        print("Generating responses for prompt: " , prompt)
         with torch.no_grad():
             generated_sequences, _ = generate_with_dual_cache(
                 model=self.model.model, prompt=expanded_prompt_ids, steps=self.gen_steps, 
@@ -174,14 +182,14 @@ class GRPOTrainer:
             )
             response_tokens = generated_sequences[:, prompt_tensor_len:]
             decoded_responses = self.tokenizer.batch_decode(response_tokens, skip_special_tokens=True)
+            print("Fetching rewards for generated responses...")
             rewards = torch.tensor(self.reward_fn(decoded_responses, prompt), dtype=torch.float32, device=self.model.model.device)
             assert len(rewards) == generated_sequences.size(0), \
                 f"Expected {generated_sequences.size(0)} scores, got {len(rewards)}"
-            # print("\n\n\n  === DEBUG rewards ===")
-            # print(f"prompt: {prompt!r}")
-            # for i, (resp, score) in enumerate(zip(decoded_responses[:4], rewards[:4])):
-            #     print(f"  [{i}] score={score:.1f}  text={resp!r}")
-            # print(f"  rewards tensor: shape={rewards.shape},  min={rewards.min():.1f}, max={rewards.max():.1f}")
+            print("\n\n\n  === DEBUG rewards ===")
+            for i, (resp, score) in enumerate(zip(decoded_responses[:4], rewards[:4])):
+                print(f"\n\n[{i}] score={score:.1f}  text={resp!r}")
+            print(f"  rewards tensor: shape={rewards.shape},  min={rewards.min():.1f}, max={rewards.max():.1f}")
         
         return generated_sequences, rewards, prompt_lens, prompt_tensor_len
         

@@ -29,6 +29,7 @@ def get_num_transfer_tokens(mask_index: torch.Tensor, steps: int) -> torch.Tenso
 def generate_with_dual_cache(
     model,
     prompt: torch.LongTensor,
+    attention_mask: Optional[torch.Tensor] = None, # shape (B, prompt_len)
     steps: int = 128,
     gen_length: int = 128,
     block_length: int = 128,
@@ -44,6 +45,23 @@ def generate_with_dual_cache(
     """
     batch_size, prompt_len = prompt.shape
     total_len = prompt_len + gen_length
+
+    if attention_mask is not None:
+        full_attention_mask = torch.ones(
+            (batch_size, total_len), 
+            dtype=attention_mask.dtype, 
+            device=attention_mask.device
+        )
+        full_attention_mask[:, :prompt_len] = attention_mask
+    else:
+        # If no mask is provided, assume all tokens are attended to.
+        full_attention_mask = torch.ones(
+            (batch_size, total_len), 
+            dtype=torch.long, 
+            device=prompt.device
+        )
+
+    print(f"attention_mask: \n {full_attention_mask}")
 
     # <-- change here to use batch_size -->
     x = torch.full(
@@ -65,7 +83,11 @@ def generate_with_dual_cache(
         end = start + block_length
 
         # —— PRIME CACHE FOR THIS BLOCK —— #
-        output = model(x, use_cache=True)
+        output = model(
+            input_ids     = x,
+            attention_mask= full_attention_mask,
+            use_cache     = True
+        )
         past_key_values = output.past_key_values
         logits = output.logits
         nfe += 1
@@ -103,10 +125,11 @@ def generate_with_dual_cache(
 
             # forward only the block slice with cache replacement
             out = model(
-                x[:, start:end],
-                past_key_values=past_key_values,
-                use_cache=True,
-                replace_position=replace_mask,
+                input_ids       = x[:, start:end],
+                attention_mask  = full_attention_mask,#[:, start:end] if attention_mask is not None else None,
+                past_key_values = past_key_values,
+                use_cache       = True,
+                replace_position= replace_mask,
             )
             logits = out.logits
             past_key_values = out.past_key_values
@@ -264,6 +287,86 @@ def get_transfer_index_vectorized(
 
     return x0, transfer
 
+def main():
+    device = 'cuda'
+    model, tokenizer = init_model(
+        model_path    = "/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5",
+        # adapter_path  = "/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/final/final/sft_adapter",
+        # load_lora     = True,
+        device        = device,
+    )
+    model = model.to(device)
+
+    # 1) Define your four prompts
+    prompts = [
+        "Describe the process of fine‑tuning a CLIP model with LoRA on a small dataset.",
+        "Describe the process of fine‑tuning a CLIP model with LoRA on a small dataset.",
+        "Describe the process of fine‑tuning a CLIP model with LoRA on a small dataset.",
+        "Describe the process of fine‑tuning a CLIP model with LoRA on a small dataset.",
+        # "Explain how a Kalman filter works in the context of object tracking.",
+        # "What are the key benefits of using Yarn rotary embeddings over vanilla RoPE?",
+        # "A number consists of two digits. The digit in the tens place is three times the digit in the units place. If you reverse the digits, the new number is 36 less than the original number. What is the original number?",
+    ]
+
+    # Artificially make the batch size 8
+    # prompts = prompts * 2  # Repeat to make batch size 8
+
+    # 2) Apply chat template to each, then batch‑tokenize (with padding)
+    wrapped = []
+    for p in prompts:
+        msg = [{"role":"user","content": p}]
+        wrapped.append(
+            tokenizer.apply_chat_template(msg, add_generation_prompt=True, tokenize=False)
+        )
+    
+    # Tokenize the wrapped prompts and pad on the left
+    tokenizer.padding_side = "left"
+    batch = tokenizer(
+        wrapped,
+        padding=True,
+        return_tensors="pt",
+    )
+
+    print(f"Attention Mask: \n {batch['attention_mask']}")
+
+    input_ids = batch["input_ids"].to(device)
+    attention_mask = batch["attention_mask"].to(device)
+
+    # 2.1) Print the input_ids for debugging
+    print("Input IDs:")
+    for i, ids in enumerate(input_ids):
+        print(f"Prompt {i+1}: {ids.tolist()}")
+        print(f"Decoded: {tokenizer.decode(ids, skip_special_tokens=False)}")
+
+    # 3) Measure generation time
+    t0 = torch.cuda.Event(enable_timing=True)
+    t1 = torch.cuda.Event(enable_timing=True)
+    t0.record()
+    out, nfe = generate_with_dual_cache(
+        model,
+        input_ids,
+        attention_mask=attention_mask,
+        steps=256,
+        gen_length=256,
+        block_length=16,
+        temperature=0.7,
+        remasking='low_confidence',
+        threshold=0.9,
+        repetition_penalty=1.2,
+    )
+    t1.record()
+    torch.cuda.synchronize()
+    elapsed = t0.elapsed_time(t1) / 1000.0
+    print(f"Generation time: {elapsed:.2f}s, NFE: {nfe}")
+
+    # 4) Decode and print each result
+    gens = tokenizer.batch_decode(
+        out[:, input_ids.shape[1]:],
+        skip_special_tokens=False
+    )
+    for i, text in enumerate(gens, start=1):
+        print(f"\n=== Prompt {i} ===\n{prompts[i-1]}\n\n→ Generation:\n{text}")
+
 # def main():
 #     device = 'cuda'
 #     model, tokenizer = init_model(
@@ -274,38 +377,20 @@ def get_transfer_index_vectorized(
 #     )
 #     model = model.to(device)
 
-#     # 1) Define your four prompts
-#     prompts = [
-#         "A number consists of two digits. The digit in the tens place is three times the digit in the units place. If you reverse the digits, the new number is 36 less than the original number. What is the original number?",
-#         "Explain how a Kalman filter works in the context of object tracking.",
-#         "Describe the process of fine‑tuning a CLIP model with LoRA on a small dataset.",
-#         "What are the key benefits of using Yarn rotary embeddings over vanilla RoPE?",
-#     ]
+#     # single “template” prompt for warm‑up + experiments
+#     single = "Explain how a Kalman filter works in the context of object tracking."
 
-#     # Artificially make the batch size 8
-#     prompts = prompts * 2  # Repeat to make batch size 8
-
-#     # 2) Apply chat template to each, then batch‑tokenize (with padding)
-#     wrapped = []
-#     for p in prompts:
-#         msg = [{"role":"user","content": p}]
-#         wrapped.append(
-#             tokenizer.apply_chat_template(msg, add_generation_prompt=True, tokenize=False)
-#         )
-#     batch = tokenizer(
-#         wrapped,
-#         padding=True,
-#         return_tensors="pt",
+#     # --- 0) WARM‑UP PASS (cache priming only) ---
+#     warm = tokenizer.apply_chat_template(
+#         [{"role":"user","content": single}],
+#         add_generation_prompt=True,
+#         tokenize=False
 #     )
-#     input_ids = batch["input_ids"].to(device)
-
-#     # 3) Measure generation time
-#     t0 = torch.cuda.Event(enable_timing=True)
-#     t1 = torch.cuda.Event(enable_timing=True)
-#     t0.record()
-#     out, nfe = generate_with_dual_cache(
+#     warm_ids = tokenizer([warm], return_tensors="pt", padding=True)["input_ids"].to(device)
+#     # one quick call to populate all caches
+#     _ , _ = generate_with_dual_cache(
 #         model,
-#         input_ids,
+#         warm_ids,
 #         steps=256,
 #         gen_length=256,
 #         block_length=16,
@@ -314,101 +399,55 @@ def get_transfer_index_vectorized(
 #         threshold=0.9,
 #         repetition_penalty=1.2,
 #     )
-#     t1.record()
-#     torch.cuda.synchronize()
-#     elapsed = t0.elapsed_time(t1) / 1000.0
-#     print(f"Generation time: {elapsed:.2f}s, NFE: {nfe}")
 
-#     # 4) Decode and print each result
-#     gens = tokenizer.batch_decode(
-#         out[:, input_ids.shape[1]:],
-#         skip_special_tokens=False
-#     )
-#     for i, text in enumerate(gens, start=1):
-#         print(f"\n=== Prompt {i} ===\n{prompts[i-1]}\n\n→ Generation:\n{text}")
+#     # --- 1) Now run the real timing loop ---
+#     batch_sizes = [1, 4]#[1, 2]#, 4, 8, 16, 32, 64]
+#     print(f"{'batch':>5}  {'time (s)':>8}  {'NFE':>4}")
+#     print("-" * 24)
 
-def main():
-    device = 'cuda'
-    model, tokenizer = init_model(
-        model_path    = "/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5",
-        adapter_path  = "/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/final/final/sft_adapter",
-        load_lora     = True,
-        device        = device,
-    )
-    model = model.to(device)
+#     for bs in batch_sizes:
+#         # build batch of size bs
+#         prompts = [single] * bs
+#         wrapped = [
+#             tokenizer.apply_chat_template(
+#                 [{"role":"user","content":p}],
+#                 add_generation_prompt=True,
+#                 tokenize=False
+#             )
+#             for p in prompts
+#         ]
+#         enc = tokenizer(wrapped, padding=True, return_tensors="pt")
+#         input_ids = enc["input_ids"].to(device)
 
-    # single “template” prompt for warm‑up + experiments
-    single = "A number consists of two digits. The digit in the tens place is three times the digit in the units place. If you reverse the digits, the new number is 36 less than the original number. What is the original number?"
+#         # time it
+#         t0 = torch.cuda.Event(enable_timing=True)
+#         t1 = torch.cuda.Event(enable_timing=True)
+#         torch.cuda.synchronize()
+#         t0.record()
+#         out, nfe = generate_with_dual_cache(
+#             model,
+#             input_ids,
+#             steps=256,
+#             gen_length=256,
+#             block_length=16,
+#             temperature=0.0,
+#             remasking='low_confidence',
+#             threshold=0.9,
+#             repetition_penalty=1.2,
+#         )
+#         t1.record()
+#         torch.cuda.synchronize()
+#         elapsed = t0.elapsed_time(t1) / 1000.0
 
-    # --- 0) WARM‑UP PASS (cache priming only) ---
-    warm = tokenizer.apply_chat_template(
-        [{"role":"user","content": single}],
-        add_generation_prompt=True,
-        tokenize=False
-    )
-    warm_ids = tokenizer([warm], return_tensors="pt", padding=True)["input_ids"].to(device)
-    # one quick call to populate all caches
-    _ , _ = generate_with_dual_cache(
-        model,
-        warm_ids,
-        steps=256,
-        gen_length=256,
-        block_length=16,
-        temperature=0.0,
-        remasking='low_confidence',
-        threshold=0.9,
-        repetition_penalty=1.2,
-    )
+#         # decode and print
+#         gens = tokenizer.batch_decode(
+#             out[:, input_ids.shape[1]:],
+#             skip_special_tokens=False
+#         )
+#         for i, text in enumerate(gens, start=1):
+#             print(f"\n=== Prompt {i} ===\n{prompts[i-1]}\n\n→ Generation:\n{text}")
 
-    # --- 1) Now run the real timing loop ---
-    batch_sizes = [1, 2]#, 4, 8, 16, 32, 64]
-    print(f"{'batch':>5}  {'time (s)':>8}  {'NFE':>4}")
-    print("-" * 24)
-
-    for bs in batch_sizes:
-        # build batch of size bs
-        prompts = [single] * bs
-        wrapped = [
-            tokenizer.apply_chat_template(
-                [{"role":"user","content":p}],
-                add_generation_prompt=True,
-                tokenize=False
-            )
-            for p in prompts
-        ]
-        enc = tokenizer(wrapped, padding=True, return_tensors="pt")
-        input_ids = enc["input_ids"].to(device)
-
-        # time it
-        t0 = torch.cuda.Event(enable_timing=True)
-        t1 = torch.cuda.Event(enable_timing=True)
-        torch.cuda.synchronize()
-        t0.record()
-        out, nfe = generate_with_dual_cache(
-            model,
-            input_ids,
-            steps=256,
-            gen_length=256,
-            block_length=16,
-            temperature=0.0,
-            remasking='low_confidence',
-            threshold=0.9,
-            repetition_penalty=1.2,
-        )
-        t1.record()
-        torch.cuda.synchronize()
-        elapsed = t0.elapsed_time(t1) / 1000.0
-
-        # decode and print
-        gens = tokenizer.batch_decode(
-            out[:, input_ids.shape[1]:],
-            skip_special_tokens=False
-        )
-        for i, text in enumerate(gens, start=1):
-            print(f"\n=== Prompt {i} ===\n{prompts[i-1]}\n\n→ Generation:\n{text}")
-
-        print(f"{bs:5d}  {elapsed:8.3f}  {nfe:4d}")
-
+#         print(f"{bs:5d}  {elapsed:8.3f}  {nfe:4d}")
 
 if __name__ == '__main__':
     main()

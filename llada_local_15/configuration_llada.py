@@ -210,8 +210,10 @@ class ModelConfig():
     """
     If ``True``, use ``FlashAttention``.
     """
-    flash_attention_version: str = "flash_attn_2"
-
+    flash_attention_version: str = "flash_attention_2"
+    """
+    The version of FlashAttention to use. Options are "flash_attention_2" or "flash_attention_3".
+    """
     attention_dropout: float = 0.1
     """
     The dropout probability within the attention modules.
@@ -361,6 +363,46 @@ class ModelConfig():
     """
     Precision used to train/evaluate with. You shouldn't set this directly.
     See :data:`TrainConfig.precision` instead.
+    """
+
+    yarn: bool = True
+    """
+    If True, use YaRN-scaled rotary embeddings.
+    """
+
+    yarn_scale: float = 1.0
+    """
+    Scaling factor for rotary embeddings. Used when extending beyond the training context.
+    """
+
+    yarn_original_max_position_embeddings: int = 4000
+    """
+    Original max context length the model was trained with (L).
+    """
+
+    yarn_extrapolation_factor: float = 1.0
+    """
+    Controls the strength of extrapolation of high-frequency rotations (n-d frequency interpolation).
+    """
+
+    yarn_attn_factor: float = 1.0
+    """
+    Rescaling factor applied to attention magnitudes.
+    """
+
+    yarn_beta_fast: float = 32.0
+    """
+    Rotational frequency threshold: above this many rotations, apply extrapolation.
+    """
+
+    yarn_beta_slow: float = 1.0
+    """
+    Rotational frequency threshold: below this, stay interpolated.
+    """
+
+    yarn_finetuned: bool = False
+    """
+    Set to True if using a model that was already finetuned with scaled rotary embeddings.
     """
 
     @property

@@ -25,80 +25,79 @@ def softmax(xs):
     return [e / S for e in exps]
 
 
-async def ruler_reward(prompt, answers, normalize_fn=id, judge_model="ollama/qwen3:14b-fp16"):
+async def ruler_reward(prompts, answers, normalize_fn=scalling, judge_model="ollama/qwen3:30b-a3b-fp16"):
     # Setup the shared system/user prompt
-    messages = [
-        {"role":"system", "content":"Your role as an assistant involves thoroughly exploring questions through a systematic long thinking process before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop well-considered thinking process. Please structure your response into two main sections: Thought and Solution. In the Thought section, detail your reasoning process using the specified format: <|begin_of_thought|> {thought with steps separated with '\n\n'} <|end_of_thought|> Each step should include detailed considerations such as analisying questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, explorations, and reflections from the Thought section, systematically present the final solution that you deem correct. The solution should remain a logical, accurate, concise expression style and detail necessary step needed to reach the conclusion, formatted as follows: <|begin_of_solution|> {final formatted, precise, and clear solution} <|end_of_solution|> Now, try to solve the following question through the above guidelines:"},
-        {"role":"user", "content":prompt},
-    ]
+    rewards = []
+    for i in range(len(prompts)):
+        print(f"Processing prompt {i + 1}/{len(prompts)}")
+        messages = [
+            {"role":"system", "content":"Your role as an assistant involves thoroughly exploring questions through a systematic long thinking process before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop well-considered thinking process. Please structure your response into two main sections: Thought and Solution. In the Thought section, detail your reasoning process using the specified format: <|begin_of_thought|> {thought with steps separated with '\n\n'} <|end_of_thought|> Each step should include detailed considerations such as analisying questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, explorations, and reflections from the Thought section, systematically present the final solution that you deem correct. The solution should remain a logical, accurate, concise expression style and detail necessary step needed to reach the conclusion, formatted as follows: <|begin_of_solution|> {final formatted, precise, and clear solution} <|end_of_solution|> Now, try to solve the following question through the above guidelines:"},
+            {"role":"user", "content":prompts[i]},
+        ]
 
-    trajectories = []
+        trajectories = []
 
-    # Add the original answer as the first trajectory
-    for answer in answers:
-        trajectories.append(
-            Trajectory(messages_and_choices=[
-                *messages,
-                Choice(finish_reason="stop", index=0, message=ChatCompletionMessage(
-                    role="assistant",
-                    content=answer
-                ))
-            ], reward=0.0)
-        )
+        # Add the original answer as the first trajectory
+        for answer in answers[i*len(answers)//len(prompts):(i+1)*len(answers)//len(prompts)]:
+            trajectories.append(
+                Trajectory(messages_and_choices=[
+                    *messages,
+                    Choice(finish_reason="stop", index=0, message=ChatCompletionMessage(
+                        role="assistant",
+                        content=answer
+                    ))
+                ], reward=0.0)
+            )
 
-    custom_rubric = """
-You are an impartial judge. Your task is to evaluate the quality of the AI-generated answer provided below based on two criteria: the correctness of the final solution and its strict adherence to the required response format.
+        custom_rubric = """
+    You are an impartial judge. Your task is to evaluate the quality of the AI-generated answer provided below based on two criteria: the correctness of the final solution and its strict adherence to the required response format.
 
-Provide a single floating-point score between 0.0 (lowest quality) and 1.0 (highest quality).
+    Provide a single floating-point score between 0.0 (lowest quality) and 1.0 (highest quality).
 
-EVALUATION CRITERIA
+    EVALUATION CRITERIA
 
-1. Required Response Format:
-The response MUST be structured with the following two sections, using the exact delimiters:
+    1. Required Response Format:
+    The response MUST be structured with the following two sections, using the exact delimiters:
 
-A "Thought" section, enclosed by <|begin_of_thought|> and <|end_of_thought|>, which details the step-by-step reasoning.
+    A "Thought" section, enclosed by <|begin_of_thought|> and <|end_of_thought|>, which details the step-by-step reasoning.
 
-A "Solution" section, enclosed by <|begin_of_solution|> and <|end_of_solution|>, which presents the final, concise answer.
+    A "Solution" section, enclosed by <|begin_of_solution|> and <|end_of_solution|>, which presents the final, concise answer.
 
-2. Correctness:
-The final answer within the <|begin_of_solution|> section must be factually accurate and logically sound.
+    2. Correctness:
+    The final answer within the <|begin_of_solution|> section must be factually accurate and logically sound.
 
-SCORING RUBRIC
+    SCORING RUBRIC
 
-1.0: The solution is completely correct and the format is followed perfectly.
+    1.0: The solution is completely correct and the format is followed perfectly.
 
-0.5 - 0.9: The response is either correct with formatting errors OR follows the format but contains errors in the solution.
+    0.5 - 0.9: The response is either correct with formatting errors OR follows the format but contains errors in the solution.
 
-0.0 - 0.4: The response is fundamentally incorrect and fails to adhere to the required format.
+    0.0 - 0.4: The response is fundamentally incorrect and fails to adhere to the required format.
 
-Your output must contain the numerical score. You can provide explanations.
-    """
-    group = TrajectoryGroup(trajectories)
-    # print("Here!")
-    # print("Evaluating group with custom rubric...")
-    try:
-        judged = await ruler_score_group(group, judge_model, rubric=custom_rubric, extra_litellm_params={"api_base": "http://127.0.0.1:11435"})
-        if judged: 
-            scores = [traj.reward for traj in list(judged.trajectories)]
-            reward = normalize_fn(scores)
-            # print(reward)
-            # sorted_trajectories = sorted(judged.trajectories, key=lambda t: t.reward, reverse=True)
-            # for rank, traj in enumerate(sorted_trajectories, 1):
-            #     messages = traj.messages()
-            #     print(f"\n\n\nRank {rank}: Score {traj.reward:.3f}")
-            #     print(f"  Response: {messages[-1]['content'][:250]}...")
-        else:
-            raise Exception("Judging failed, no trajectories returned.")
-    except Exception as e:
-        print(f"Error during judging: {e}")
-        scores = []
-        for traj in trajectories:
-            single_traj = TrajectoryGroup([traj])
-            judged = await ruler_score_group(single_traj, judge_model, rubric=custom_rubric, extra_litellm_params={"api_base": "http://127.0.0.1:11435"})
-            score = list(judged.trajectories)[0].reward
-            scores.append(score)
-        reward = normalize_fn(scores)
-    return reward
+    Your output must contain the numerical score. You can provide explanations.
+        """
+        group = TrajectoryGroup(trajectories)
+        # print("Here!")
+        # print("Evaluating group with custom rubric...")
+        try:
+            judged = await ruler_score_group(group, judge_model, rubric=custom_rubric, extra_litellm_params={"api_base": "http://127.0.0.1:11435"})
+            if judged: 
+                scores = [traj.reward for traj in list(judged.trajectories)]
+                reward = normalize_fn(scores)
+                rewards += reward
+                # print(reward)
+                # sorted_trajectories = sorted(judged.trajectories, key=lambda t: t.reward, reverse=True)
+                # for rank, traj in enumerate(sorted_trajectories, 1):
+                #     messages = traj.messages()
+                #     print(f"\n\n\nRank {rank}: Score {traj.reward:.3f}")
+                #     print(f"  Response: {messages[-1]['content'][:250]}...")
+            else:
+                raise Exception("Judging failed, no trajectories returned.")
+        except Exception as e:
+            print(f"Error during judging: {e}")
+            reward = [0.0 for _ in range(len(answers))]
+            rewards += reward
+    return rewards
 
 def sync_ruler_reward(texts: list[str], prompt: str) -> list[float]:
     # run the async function to completion on the current event loop

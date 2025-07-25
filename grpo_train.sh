@@ -2,14 +2,14 @@
 set -x
 
 # === PATHS ===
-BASE_MODEL_PATH="./llada_local_1.5"      # Your base model path (non-merged)
+BASE_MODEL_PATH="./llada_local_15"      # Your base model path (non-merged)
 OUTPUT_DIR="./grpo_checkpoints_lora"      # Where to save the trained GRPO LoRA adapter
 
 mkdir -p "$OUTPUT_DIR"
 
 # === TRAIN CONFIG ===
 TRAIN_BATCH=64
-MICRO_BATCH=2
+MICRO_BATCH=1
 ZERO_STAGE=2
 BF16="--bf16"
 FLASH="--flash_attn"

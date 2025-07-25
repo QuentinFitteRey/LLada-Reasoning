@@ -19,6 +19,8 @@ from rlhf.deepspeedStrategy import DeepspeedStrategy
 from rlhf.prompt_dataset import PromptDataset
 from openrlhf.datasets.utils import blending_datasets
 from rlhf.ruler import sync_ruler_reward
+from peft import LoraConfig, get_peft_model, PeftModel
+
 
 # Import the new GRPO Trainer
 from rlhf.grpo_trainer import GRPOTrainer
@@ -55,6 +57,24 @@ def init_model(args, model_path):
         torch_dtype=torch.bfloat16,
         local_files_only=True,
     )
+    special_tokens_to_add = {
+        "additional_special_tokens": ["<|mdm_mask|>", "<|start_header_id|>", "<|end_header_id|>","<|eot_id|>","<|begin_of_thought|>","<|end_of_thought|>" "<|begin_of_solution|>", "<|end_of_solution|>"]
+    }
+    if tokenizer.pad_token is None:
+        special_tokens_to_add["pad_token"] = "<|pad|>"
+        
+    tokenizer.add_special_tokens(special_tokens_to_add)
+    model.resize_token_embeddings(len(tokenizer))
+    model = PeftModel.from_pretrained(model, "/home/hice1/yluo432/scratch/LLada-Reasoning/step-1100/sft_adapter")
+    model = model.merge_and_unload()
+    special_tokens_to_add = {
+        "additional_special_tokens": ["<|mdm_mask|>", "<|start_header_id|>", "<|end_header_id|>","<|eot_id|>","<|begin_of_thought|>","<|end_of_thought|>","<|begin_of_solution|>", "<|end_of_solution|>"]
+    }
+    if tokenizer.pad_token is None:
+        special_tokens_to_add["pad_token"] = "<|pad|>"
+        
+    tokenizer.add_special_tokens(special_tokens_to_add)
+    model.resize_token_embeddings(len(tokenizer))
     print(f"Model from {model_path} loaded successfully.")
     return model, tokenizer
 
