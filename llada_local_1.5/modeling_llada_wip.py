@@ -472,30 +472,45 @@ class RotaryEmbedding(nn.Module):
     def forward(self, q, k, block_end_index=None):
         q_, k_ = (q.float(), k.float()) if self.config.rope_full_precision else (q, k)
 
-        query_len = q_.shape[-2]
-        key_len   = k_.shape[-2]
-
+        query_len, key_len = q_.shape[-2], k_.shape[-2]
         pos_sin, pos_cos = self.get_rotary_embedding(key_len, q_.device)
 
-        # NEW: Safeguard slicing for batch-wise uniformity
-        if block_end_index is None:
-            start = key_len - query_len
-            end   = key_len
+        # NEW: The code in the 'else' block is moved up and modified
+        if block_end_index is not None:
+            # BATCHED RoPE application for `q`
+            # block_end_index is now shape (B,)
+            B = q.shape[0]
+            rotated_q = torch.empty_like(q_)
+            # Loop over each item in the batch
+            for i in range(B):
+                # Get the specific end index for this item
+                end = block_end_index[i].item()
+                start = end - query_len
+                
+                # Slice the sin/cos embeddings for this item's specific range
+                sin_slice = pos_sin[0, 0, start:end, :]
+                cos_slice = pos_cos[0, 0, start:end, :]
+                
+                # Rotate only the i-th query and store it
+                rotated_q[i] = self.apply_rotary_pos_emb(
+                    sin_slice.unsqueeze(0).unsqueeze(0),
+                    cos_slice.unsqueeze(0).unsqueeze(0),
+                    q_[i].unsqueeze(0)
+                ).squeeze(0)
+            q_ = rotated_q
         else:
-            idx = block_end_index.item()
-            start = idx - query_len
-            end   = idx
+            # Standard case for initial pass (no change)
+            start = key_len - query_len
+            end = key_len
+            q_ = self.apply_rotary_pos_emb(
+                pos_sin[:, :, start:end, :],
+                pos_cos[:, :, start:end, :],
+                q_,
+            )
 
-        # VALIDATION
-        assert start >= 0 and end <= pos_sin.shape[-2], \
-            f"Invalid rotary slice: start={start}, end={end}, sin_len={pos_sin.shape[-2]}"
-
-        sin_slice = pos_sin[:, :, start:end, :]
-        cos_slice = pos_cos[:, :, start:end, :]
-
-        q_ = self.apply_rotary_pos_emb(sin_slice, cos_slice, q_)
+        # Key rotation is unchanged, it applies to the whole key cache
         k_ = self.apply_rotary_pos_emb(pos_sin[:, :, :key_len, :], pos_cos[:, :, :key_len, :], k_)
-
+        
         return q_.type_as(q), k_.type_as(k)
 
 class YarnRotaryEmbedding(nn.Module):
@@ -912,7 +927,7 @@ class LLaDABlock(nn.Module):
                 # past_key shape is [B, n_kv_h, L, hs]
                 # Replace selected_length number of 1s in past_key with k
                 # Get the indices that need to be replaced
-                replace_indices = replace_position.nonzero(as_tuple=True)[1]  # [selected_length]
+                # replace_indices = replace_position.nonzero(as_tuple=True)[1]  # [selected_length]
                 # Use scatter operation to perform replacement
                 for b in range(B):
                     idxs = replace_position[b].nonzero(as_tuple=True)[0]   # e.g. [16] indices
@@ -932,7 +947,17 @@ class LLaDABlock(nn.Module):
             if replace_position is None:
                 q, k = self.rotary_emb(q, k)
             else:
-                q, k = self.rotary_emb(q, k, replace_indices.max()+1)
+                # FIX: Calculate the max index for EACH item in the batch
+                L = replace_position.shape[1]
+                # Creates a tensor of column indices like [[0, 1, ..., L-1], ...]
+                col_indices = torch.arange(L, device=replace_position.device).unsqueeze(0)
+                # Sets indices to -1 where replace_position is False
+                masked_indices = torch.where(replace_position, col_indices, -1)
+                # Gets the max index per row, resulting in a shape of (B,)
+                max_indices_per_item = masked_indices.max(dim=1).values
+                
+                # Pass the per-batch indices (shape B,) to the rotary embedding function
+                q, k = self.rotary_emb(q, k, max_indices_per_item + 1)
         elif getattr(self.config, "yarn", False):
             # YarnRoPE needs seq_len_override kwarg
             if replace_position is None:
@@ -941,14 +966,43 @@ class LLaDABlock(nn.Module):
                 q, k = self.rotary_emb(q, k, seq_len_override=replace_indices.max()+1)
 
         if attention_bias is not None:
-            # Resize and cast attention bias.
-            # The current dtype of the attention bias might not match the dtype that the SDP attn function will
-            # run in if AMP is enabled, and this can be a problem if some tokens are masked out due to padding
-            # as down-casting the attention bias to the autocast precision will result in -infs, which will
-            # cause the SDP attn function to produce NaNs.
-            attention_bias = self._cast_attn_bias(
-                attention_bias[:, :, key_len - query_len : key_len, :key_len], dtype
-            )
+            if replace_position is not None:
+                # --- REFINEMENT CASE ---
+                B, _, query_len, _ = q.shape
+                key_len = k.shape[-2]
+
+                # Expand the bias to the batch size if it's not already
+                if attention_bias.shape[0] == 1:
+                    attention_bias = attention_bias.expand(B, -1, -1, -1)
+
+                # Find the actual indices of the queries for each batch item
+                cols = torch.arange(key_len, device=q.device)
+                masked_cols = torch.where(replace_position, cols, key_len + 1)
+                sorted_indices, _ = torch.sort(masked_cols, dim=1)
+                query_indices = sorted_indices[:, :query_len]  # Shape: (B, query_len)
+
+                # Build the final bias using a loop to ensure correct indexing
+                # Target shape is (B, 1, query_len, key_len)
+                bias_slices = []
+                for i in range(B):
+                    # For each item, get its full bias matrix (1, key_len, key_len)
+                    item_full_bias = attention_bias[i]
+                    # And its specific query indices (query_len,)
+                    item_query_indices = query_indices[i]
+                    # Gather the correct rows from the bias matrix
+                    item_slice = item_full_bias[:, item_query_indices, :] # Shape: (1, query_len, key_len)
+                    bias_slices.append(item_slice)
+
+                final_attention_bias = torch.stack(bias_slices, dim=0) # Shape: (B, 1, query_len, key_len)
+
+            else:
+                # --- STANDARD CASE (e.g., initial pass) ---
+                query_len, key_len = q.shape[-2], k.shape[-2]
+                final_attention_bias = attention_bias[:, :, key_len - query_len : key_len, :key_len]
+
+            final_attention_bias = self._cast_attn_bias(final_attention_bias, q.dtype)
+        else:
+            final_attention_bias = None
 
         # Get the attention scores.
         # shape: (B, nh, T, hs)
@@ -956,7 +1010,7 @@ class LLaDABlock(nn.Module):
             q,
             k,
             v,
-            attn_mask=attention_bias,
+            attn_mask=final_attention_bias,
             dropout_p=0.0 if not self.training else self.config.attention_dropout,
             is_causal=False,
         )
@@ -1571,6 +1625,14 @@ class LLaDAModel(nn.Module):
         else:
             past_length = past_key_values[0][0].size(-2)
 
+        if replace_position is not None:
+            # In a refinement step, we are overwriting part of the cache.
+            # The total sequence length does not change; it's the length of the cache.
+            total_attention_len = past_length
+        else:
+            # In a standard forward pass, we are appending new tokens.
+            total_attention_len = past_length + seq_len
+
         # Get embeddings of input.
         # shape: (batch_size, seq_len, d_model)
         x = self.transformer.wte(input_ids) if input_embeddings is None else input_embeddings  # type: ignore
@@ -1610,10 +1672,10 @@ class LLaDAModel(nn.Module):
         ):
             if attention_bias is None and self.config.alibi:
                 attention_bias = get_causal_attention_bias(
-                    self.__cache, past_length + seq_len, x.device
-                ) + self.get_alibi_attention_bias(past_length + seq_len, x.device)
+                    self.__cache, total_attention_len, x.device
+                ) + self.get_alibi_attention_bias(total_attention_len, x.device)
             elif attention_bias is None:
-                attention_bias = get_causal_attention_bias(self.__cache, past_length + seq_len, x.device)
+                attention_bias = get_causal_attention_bias(self.__cache, total_attention_len, x.device)
             elif attention_bias.dtype in (torch.int8, torch.bool):
                 attention_bias = attention_bias.to(dtype=torch.float)
                 attention_bias.masked_fill_(attention_bias == 0.0, torch.finfo(attention_bias.dtype).min)

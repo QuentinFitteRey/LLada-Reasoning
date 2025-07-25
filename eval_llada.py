@@ -105,6 +105,8 @@ class LLaDAEvalHarness(LM):
         )
         # model = model.to(device)
         self.model = model
+        # Pad on the left for generation
+        tokenizer.padding_side = "left"
         self.tokenizer = tokenizer
         self.model.eval()
 
@@ -541,6 +543,10 @@ class LLaDAEvalHarness(LM):
         # BATCHED VERSION
         all_prompts: list[list[int]] = []
         raw_texts: list[str]     = []
+
+        # Make sure the padding is on the left
+        self.tokenizer.padding_side = "left"
+
         for elem in tqdm(ds, desc="Preparing prompts..."):
             # reconstruct your engineered prompt here
             if use_thinking:

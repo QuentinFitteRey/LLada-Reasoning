@@ -1,7 +1,7 @@
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
-from peft import PeftModel, PeftConfig, LoraConfig, get_peft_model_state_dict, set_peft_model_state_dict
+from peft import PeftModel, PeftConfig, LoraConfig, get_peft_model_state_dict, set_peft_model_state_dict, get_peft_model
 import os
 
 adapter_default = os.path.expanduser("~/scratch/LLaDA_checkpoints/test_checkpoint")
@@ -27,11 +27,19 @@ def init_model(
         local_files_only=local_files_only
     )
 
-    special_tokens_to_add = {
-        "additional_special_tokens": ["<|mdm_mask|>", "<think>", "</think>", "<|start_header_id|>", "<|end_header_id|>","<|eot_id|>"]
-    }
+    if load_lora:
+        # Instruct + Reasoning special tokens
+        special_tokens_to_add = {
+            "additional_special_tokens": ["<think>", "</think>"]
+        }
+    else:
+        # Instruct special tokens only
+        special_tokens_to_add = {
+            "additional_special_tokens": []
+        }
 
     if tokenizer.pad_token is None:
+        print("No pad token found, adding <|pad|> as pad token.")
         special_tokens_to_add["pad_token"] = "<|pad|>"
 
     # Add tokens to tokenizer
@@ -62,7 +70,6 @@ def init_model(
         real_adapter = adapter_path or adapter_default
         print(f"🔗 Loading LoRA adapter from {real_adapter} …")
         # this will raise if real_adapter isn’t actually a PEFT folder
-        from peft import PeftConfig, PeftModel
 
         # validate that adapter really is a peft folder
         try:
@@ -71,6 +78,12 @@ def init_model(
             print("LoRA adapter loaded.")
         except Exception as e:
             print("Could not load adapter:", e)
+    else: # Add an empty adapter if not loading LoRA
+        print("No LoRA adapter specified, using empty adapter.")
+        config = LoraConfig(
+            r=8, # Rank can be small, it doesn't matter much since it will be zeroed out
+            lora_alpha=16,         target_modules=[            "q_proj",             "k_proj",             "v_proj",             "o_proj",             "gate_proj",             "up_proj", "down_proj", ], lora_dropout=0.0, bias="none", task_type="CAUSAL_LM", )
+        model = get_peft_model(model, config)
 
     return model, tokenizer
 
