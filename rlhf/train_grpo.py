@@ -18,12 +18,13 @@ from rlhf.deepspeedStrategy import DeepspeedStrategy
 # Use PromptDataset for GRPO as we only need prompts
 from rlhf.prompt_dataset import PromptDataset
 from openrlhf.datasets.utils import blending_datasets
+from rlhf.ruler import sync_ruler_reward
 
 # Import the new GRPO Trainer
 from rlhf.grpo_trainer import GRPOTrainer
 
 
-def regex_reward_fn(texts: list[str]) -> list[float]:
+def regex_reward_fn(texts: list[str], prompt: str) -> list[float]:
     """
     A simple example reward function.
     Gives a reward of 1.0 if the text contains a specific desirable pattern, 
@@ -138,7 +139,7 @@ def train(args):
     trainer = GRPOTrainer(
         model=model,
         ref_model=ref_model,
-        reward_fn=regex_reward_fn, # Pass the chosen reward function
+        reward_fn=sync_ruler_reward, # Pass the chosen reward function
         tokenizer=tokenizer,
         strategy=strategy,
         optim=optim,
@@ -211,6 +212,7 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_org", type=str, default=None)
     parser.add_argument("--wandb_group", type=str, default=None)
     parser.add_argument("--wandb_project", type=str, default="llada_grpo")
+    parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument("--use_tensorboard", type=str, default=None, help="TensorBoard logging path")
 
     # --- New GRPO/Generation Arguments ---

@@ -45,6 +45,7 @@ class PromptDataset(Dataset):
             formatted_prompts.append(formatted_p)
 
         # 3. MODIFIED: Tokenize the list of *formatted* strings
+        self.tokenizer.padding_side = "left"
         tokenized_batch = self.tokenizer(
             formatted_prompts,
             padding="longest",
@@ -58,6 +59,7 @@ class PromptDataset(Dataset):
         
         # 5. Return the final tensor dictionary for the model
         return {
+            "prompt_texts": formatted_prompts,
             "prompt_ids": tokenized_batch['input_ids'],
             "prompt_mask": tokenized_batch['attention_mask'],
             "prompt_lens": prompt_lens

@@ -5,7 +5,7 @@ from openrlhf.utils.distributed_sampler import DistributedSampler
 
 # --- Core Imports ---
 from rlhf.grpo_loss import GRPOLoss
-from new_generation import generate_with_dual_cache
+from fixed_generation_dual_cache import generate_with_dual_cache
 
 class GRPOTrainer:
     """
@@ -36,7 +36,7 @@ class GRPOTrainer:
         remasking_threshold: float = 0.9,
         repetition_penalty: float = 1.2,
         # LLADA-specific ELBO estimation parameters
-        n_t: int = 8,
+        n_t: int = 4,
         eps: float = 0.1,
     ) -> None:
         self.strategy = strategy
@@ -157,6 +157,7 @@ class GRPOTrainer:
             epoch_bar.update()
 
     def _generate_and_score(self, batch):
+        prompt = batch["prompt_texts"][0]
         prompt_ids = batch["prompt_ids"].to(torch.cuda.current_device())
         prompt_lens = batch["prompt_lens"].to(torch.cuda.current_device())
         prompt_tensor_len = prompt_ids.shape[1]
@@ -173,16 +174,14 @@ class GRPOTrainer:
             )
             response_tokens = generated_sequences[:, prompt_tensor_len:]
             decoded_responses = self.tokenizer.batch_decode(response_tokens, skip_special_tokens=True)
-            rewards = torch.tensor(self.reward_fn(decoded_responses), dtype=torch.float32, device=self.model.model.device)
-            raw_scores = self.reward_fn(decoded_responses)
-            assert len(raw_scores) == generated_sequences.size(0), \
-                f"Expected {generated_sequences.size(0)} scores, got {len(raw_scores)}"
-            print("=== DEBUG rewards ===")
-            for i, (resp, score) in enumerate(zip(decoded_responses[:4], raw_scores[:4])):
-                print(f"  [{i}] score={score:.1f}  text={resp!r}")
-            rewards = torch.tensor(raw_scores, dtype=torch.float32,
-                                device=self.model.model.device)
-            print(f"  rewards tensor: shape={rewards.shape},  min={rewards.min():.1f}, max={rewards.max():.1f}")
+            rewards = torch.tensor(self.reward_fn(decoded_responses, prompt), dtype=torch.float32, device=self.model.model.device)
+            assert len(rewards) == generated_sequences.size(0), \
+                f"Expected {generated_sequences.size(0)} scores, got {len(rewards)}"
+            # print("\n\n\n  === DEBUG rewards ===")
+            # print(f"prompt: {prompt!r}")
+            # for i, (resp, score) in enumerate(zip(decoded_responses[:4], rewards[:4])):
+            #     print(f"  [{i}] score={score:.1f}  text={resp!r}")
+            # print(f"  rewards tensor: shape={rewards.shape},  min={rewards.min():.1f}, max={rewards.max():.1f}")
         
         return generated_sequences, rewards, prompt_lens, prompt_tensor_len
         
