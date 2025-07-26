@@ -240,6 +240,7 @@ class DeepspeedStrategy(ABC):
             args={"local_rank": int(os.environ.get("LOCAL_RANK", "-1"))},
             dist_init_required=True,
         )
+        self.engine = engine
         if self.deepcompile:
             engine.compile()
         if is_actor:

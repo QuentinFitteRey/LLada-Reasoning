@@ -7,7 +7,7 @@ from openrlhf.utils.distributed_sampler import DistributedSampler
 from rlhf.grpo_loss import GRPOLoss
 from fixed_generation_dual_cache import generate_with_dual_cache
 
-SAVE_EVERY = 10
+SAVE_EVERY = 2
 
 class GRPOTrainer:
     """
@@ -140,26 +140,33 @@ class GRPOTrainer:
                     batch_loss_sum += loss_t.item()
                     batch_reward_sum += mean_reward_t.item()
 
-                self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
-                
-                avg_loss = batch_loss_sum / self.n_t
-                avg_reward = batch_reward_sum / self.n_t
-                
-                logs_dict = {"loss": avg_loss, "reward": avg_reward, "lr": self.scheduler.get_last_lr()[0]}
-                logs_dict = self.strategy.all_reduce(logs_dict)
-                step_bar.set_postfix(logs_dict)
-                step_bar.update()
-
                 # Replicated logging/saving logic from your DPOTrainer
                 if step % self.strategy.accumulated_gradient == 0:
+                    self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
+                
+                    avg_loss = batch_loss_sum / self.n_t
+                    avg_reward = batch_reward_sum / self.n_t
+                    
+                    logs_dict = {"loss": avg_loss, "reward": avg_reward, "lr": self.scheduler.get_last_lr()[0]}
+                    logs_dict = self.strategy.all_reduce(logs_dict)
+                    step_bar.set_postfix(logs_dict)
+                    step_bar.update()
                     global_step = step // self.strategy.accumulated_gradient
                     client_states = {"consumed_samples": global_step * args.train_batch_size}
                     self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
-                    if global_step % SAVE_EVERY == 0 and self.strategy.is_rank_0():
-                        ckpt_path = os.path.join(self.strategy.args.save_path, f"_SHP_2_lora_ckpt_{global_step}")
+                    if global_step % SAVE_EVERY == 0:
+                        ckpt_path = os.path.join(self.strategy.args.save_path, f"_GRPO_lora_ckpt_{global_step}")
                         os.makedirs(ckpt_path, exist_ok=True)
                         self.model.model.save_pretrained(ckpt_path)
                         print(f"Saved LoRA checkpoint at step {global_step} to {ckpt_path}", flush=True)
+                        tag = "ds_checkpoint"
+                        if self.strategy.is_rank_0():
+                            print(f"Saving full DS checkpoint to {os.path.join(ckpt_path, tag)}")
+                        self.strategy.engine.save_checkpoint(
+                            ckpt_path,   # base dir
+                            client_state=client_states,  # your consumed_samples, etc.
+                            tag=tag
+                        )
                 
                 step += 1
             epoch_bar.update()
@@ -171,7 +178,7 @@ class GRPOTrainer:
         prompt_tensor_len = prompt_ids.shape[1]
         
         expanded_prompt_ids = prompt_ids.repeat_interleave(self.num_samples_per_prompt, dim=0)
-        print("Generating responses for prompt: " , prompt)
+        # print("Generating responses for prompt: " , prompt)
         with torch.no_grad():
             generated_sequences, _ = generate_with_dual_cache(
                 model=self.model.model, prompt=expanded_prompt_ids, steps=self.gen_steps, 
@@ -182,14 +189,14 @@ class GRPOTrainer:
             )
             response_tokens = generated_sequences[:, prompt_tensor_len:]
             decoded_responses = self.tokenizer.batch_decode(response_tokens, skip_special_tokens=True)
-            print("Fetching rewards for generated responses...")
+            # print("Fetching rewards for generated responses...")
             rewards = torch.tensor(self.reward_fn(decoded_responses, prompt), dtype=torch.float32, device=self.model.model.device)
-            assert len(rewards) == generated_sequences.size(0), \
-                f"Expected {generated_sequences.size(0)} scores, got {len(rewards)}"
-            print("\n\n\n  === DEBUG rewards ===")
-            for i, (resp, score) in enumerate(zip(decoded_responses[:4], rewards[:4])):
-                print(f"\n\n[{i}] score={score:.1f}  text={resp!r}")
-            print(f"  rewards tensor: shape={rewards.shape},  min={rewards.min():.1f}, max={rewards.max():.1f}")
+            # assert len(rewards) == generated_sequences.size(0), \
+            #     f"Expected {generated_sequences.size(0)} scores, got {len(rewards)}"
+            # print("\n\n\n  === DEBUG rewards ===")
+            # for i, (resp, score) in enumerate(zip(decoded_responses[:4], rewards[:4])):
+            #     print(f"\n\n[{i}] score={score:.1f}  text={resp!r}")
+            # print(f"  rewards tensor: shape={rewards.shape},  min={rewards.min():.1f}, max={rewards.max():.1f}")
         
         return generated_sequences, rewards, prompt_lens, prompt_tensor_len
         

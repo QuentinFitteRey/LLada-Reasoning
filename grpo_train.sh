@@ -2,7 +2,6 @@
 set -x
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3
-conda activate ~/scratch/envs/llada
 
 
 # === PATHS ===
@@ -12,9 +11,9 @@ OUTPUT_DIR="./grpo_checkpoints_lora"      # Where to save the trained GRPO LoRA 
 mkdir -p "$OUTPUT_DIR"
 
 # === TRAIN CONFIG ===
-TRAIN_BATCH=64
+TRAIN_BATCH=32
 MICRO_BATCH=1
-ZERO_STAGE=2
+ZERO_STAGE=0
 BF16="--bf16"
 FLASH="--flash_attn"
 MAX_LEN=4096
@@ -47,7 +46,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 deepspeed rlhf/train_grpo.py \
     --pretrain "$BASE_MODEL_PATH" \
     --dataset /home/hice1/yluo432/scratch/LLada-Reasoning/filtered_conversational_dataset_4k \
-    --dataset_probs 1.0 \
+    --sft_adapter_path /home/hice1/yluo432/scratch/LLada-Reasoning/step-1100/sft_adapter \
+    --load_ckpt /home/hice1/yluo432/scratch/LLada-Reasoning/grpo_checkpoints_lora/_GRPO_lora_ckpt_1 \
     --save_path "$OUTPUT_DIR" \
     --max_len "$MAX_LEN" \
     --train_batch_size "$TRAIN_BATCH" \

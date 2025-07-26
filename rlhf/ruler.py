@@ -85,12 +85,12 @@ async def ruler_reward(prompts, answers, normalize_fn=scalling, judge_model="oll
                 scores = [traj.reward for traj in list(judged.trajectories)]
                 reward = normalize_fn(scores)
                 rewards += reward
-                # print(reward)
-                # sorted_trajectories = sorted(judged.trajectories, key=lambda t: t.reward, reverse=True)
-                # for rank, traj in enumerate(sorted_trajectories, 1):
-                #     messages = traj.messages()
-                #     print(f"\n\n\nRank {rank}: Score {traj.reward:.3f}")
-                #     print(f"  Response: {messages[-1]['content'][:250]}...")
+                print(reward)
+                sorted_trajectories = sorted(judged.trajectories, key=lambda t: t.reward, reverse=True)
+                for rank, traj in enumerate(sorted_trajectories, 1):
+                    messages = traj.messages()
+                    print(f"\n\n\nRank {rank}: Score {traj.reward:.3f}")
+                    print(f"  Response: {messages[-1]['content'][:250]}...")
             else:
                 raise Exception("Judging failed, no trajectories returned.")
         except Exception as e:
