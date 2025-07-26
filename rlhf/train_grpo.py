@@ -174,8 +174,8 @@ def train(args):
     consumed_samples = 0
     if args.load_ckpt:
         strategy.print(f"Loading checkpoint from: {args.load_ckpt}")
-        base_dir = args.ckpt_path
-        tag          = "ds_checkpoint"
+        base_dir = args.load_ckpt
+        tag="ds_checkpoint"
         # engine.load_checkpoint returns (load_succeeded, client_state)
         loaded, client_state = strategy.engine.load_checkpoint(
             base_dir,
