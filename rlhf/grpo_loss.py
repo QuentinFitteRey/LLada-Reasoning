@@ -21,8 +21,18 @@ class GRPOLoss:
                  rewards: torch.Tensor,
                  num_samples_per_prompt: int):
         """Calculates the GRPO loss using PPO-style clipping."""
+        policy_logprobs    = torch.nan_to_num(
+            policy_logprobs,    nan=-100.0, posinf=+100.0, neginf=-100.0
+        )
+        old_policy_logprobs = torch.nan_to_num(
+            old_policy_logprobs, nan=-100.0, posinf=+100.0, neginf=-100.0
+        )
+        ref_logprobs       = torch.nan_to_num(
+            ref_logprobs,       nan=-100.0, posinf=+100.0, neginf=-100.0
+        )
         batch_size = rewards.shape[0] // num_samples_per_prompt
         k = num_samples_per_prompt
+
 
         rewards = rewards.view(batch_size, k)
         policy_logprobs = policy_logprobs.view(batch_size, k)
@@ -33,6 +43,7 @@ class GRPOLoss:
         
         # --- Probability Ratio Calculation ---
         log_ratio = policy_logprobs - old_policy_logprobs
+        log_ratio = torch.clamp(log_ratio, min=-10.0, max=+10.0)
         ratio = torch.exp(log_ratio)
         # ---
         

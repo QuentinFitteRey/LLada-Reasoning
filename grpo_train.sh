@@ -11,15 +11,15 @@ OUTPUT_DIR="./grpo_checkpoints_lora"      # Where to save the trained GRPO LoRA 
 mkdir -p "$OUTPUT_DIR"
 
 # === TRAIN CONFIG ===
-TRAIN_BATCH=32
+TRAIN_BATCH=8
 MICRO_BATCH=1
-ZERO_STAGE=0
+ZERO_STAGE=2
 BF16="--bf16"
 FLASH="--flash_attn"
 MAX_LEN=4096
 EPOCHS=1
-LR=5e-5
-BETA=0.1
+LR=1e-6
+BETA=0.04
 
 # === LORA CONFIG ===
 LORA_ARGS="\
@@ -32,8 +32,8 @@ LORA_ARGS="\
 # === GRPO/GENERATION CONFIG (NEW) ===
 # These are arguments for your custom generate_with_dual_cache function and the trainer
 NUM_SAMPLES=4           # 'k' samples to generate per prompt
-GEN_STEPS=2048           # Number of diffusion steps for generation
-GEN_LENGTH=2048          # Max new tokens to generate
+GEN_STEPS=1024           # Number of diffusion steps for generation
+GEN_LENGTH=1024          # Max new tokens to generate
 TEMP=0.7                # Temperature for sampling
 REMASK_THRESH=0.9       # Remasking threshold for diffusion
 REP_PENALTY=1.2         # Repetition penalty for generation
@@ -45,9 +45,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # === RUN ===
 deepspeed rlhf/train_grpo.py \
     --pretrain "$BASE_MODEL_PATH" \
-    --dataset /home/hice1/yluo432/scratch/LLada-Reasoning/filtered_conversational_dataset_4k \
+    --dataset openai/gsm8k@main \
     --sft_adapter_path /home/hice1/yluo432/scratch/LLada-Reasoning/step-1100/sft_adapter \
-    --load_ckpt /home/hice1/yluo432/scratch/LLada-Reasoning/grpo_checkpoints_lora/_GRPO_lora_ckpt_1 \
     --save_path "$OUTPUT_DIR" \
     --max_len "$MAX_LEN" \
     --train_batch_size "$TRAIN_BATCH" \
@@ -62,7 +61,6 @@ deepspeed rlhf/train_grpo.py \
     --logging_steps 1 \
     --save_steps -1 \
     --eval_steps -1 \
-    --gradient_checkpointing \
     --use_wandb dc953a73754e73f853a4148bed458100f5ed36f7 \
     --wandb_project "LLada-Reasoning" \
     --wandb_run_name "GRPO_training" \

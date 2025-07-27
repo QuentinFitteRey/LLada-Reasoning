@@ -61,7 +61,7 @@ def generate_with_dual_cache(
             device=prompt.device
         )
 
-    print(f"attention_mask: \n {full_attention_mask}")
+    # print(f"attention_mask: \n {full_attention_mask}")
 
     # <-- change here to use batch_size -->
     x = torch.full(
@@ -327,16 +327,16 @@ def main():
         return_tensors="pt",
     )
 
-    print(f"Attention Mask: \n {batch['attention_mask']}")
+    # print(f"Attention Mask: \n {batch['attention_mask']}")
 
     input_ids = batch["input_ids"].to(device)
     attention_mask = batch["attention_mask"].to(device)
 
     # 2.1) Print the input_ids for debugging
-    print("Input IDs:")
-    for i, ids in enumerate(input_ids):
-        print(f"Prompt {i+1}: {ids.tolist()}")
-        print(f"Decoded: {tokenizer.decode(ids, skip_special_tokens=False)}")
+    # print("Input IDs:")
+    # for i, ids in enumerate(input_ids):
+        # print(f"Prompt {i+1}: {ids.tolist()}")
+        # print(f"Decoded: {tokenizer.decode(ids, skip_special_tokens=False)}")
 
     # 3) Measure generation time
     t0 = torch.cuda.Event(enable_timing=True)

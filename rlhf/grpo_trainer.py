@@ -2,7 +2,7 @@ import os
 import torch
 from tqdm import tqdm
 from openrlhf.utils.distributed_sampler import DistributedSampler
-
+import torch.nn.functional as F
 # --- Core Imports ---
 from rlhf.grpo_loss import GRPOLoss
 from fixed_generation_dual_cache import generate_with_dual_cache
@@ -94,9 +94,14 @@ class GRPOTrainer:
         if args.save_steps <= 0: args.save_steps = float("inf")
 
         # Replicated step/epoch logic from your DPOTrainer
-        step = consumed_samples // args.train_batch_size * self.strategy.accumulated_gradient + 1
-        start_epoch = consumed_samples // args.train_batch_size // num_update_steps_per_epoch
-        consumed_samples = consumed_samples % (num_update_steps_per_epoch * args.train_batch_size)
+        grad_accum_steps = self.strategy.accumulated_gradient
+        ppo_epochs = 4
+        
+        # Correctly initialize global_step and start_epoch for resuming from a checkpoint
+        start_epoch = consumed_samples // (num_update_steps_per_epoch * args.train_batch_size)
+        global_step = consumed_samples // args.train_batch_size
+        
+        experience_buffer = []
 
         epoch_bar = tqdm(range(start_epoch, self.epochs), desc="Train epoch", disable=not self.strategy.is_rank_0())
 
@@ -106,70 +111,121 @@ class GRPOTrainer:
                 self.train_dataloader.sampler.set_epoch(epoch, consumed_samples=0 if epoch > start_epoch else consumed_samples)
 
             step_bar = tqdm(range(len(self.train_dataloader)), desc=f"Epoch {epoch} steps", disable=not self.strategy.is_rank_0())
-            self.model.train()
-            self.ref_model.eval()
 
             for step_idx, batch in enumerate(self.train_dataloader):
                 print(f"Processing batch {step_idx + 1}/{len(self.train_dataloader)}")
-                generated_sequences, rewards, prompt_lens_tensor, _ = self._generate_and_score(batch)
-                attention_mask = (generated_sequences != self.pad_id).long()
-                expanded_prompt_lens = prompt_lens_tensor.repeat_interleave(self.num_samples_per_prompt)
-                
-                batch_loss_sum = 0
-                batch_reward_sum = 0
-                
-                for _ in range(self.n_t):
-                    t = (1 - self.eps) * torch.rand(1).item() + self.eps
-                    _, masked_sequences, _ = self.forward_process(generated_sequences, t)
+                with torch.no_grad():
+                    generated_sequences, rewards, prompt_lens_tensor, _ = self._generate_and_score(batch)
+                    experience_buffer.append({
+                        'sequences': generated_sequences.cpu(),
+                        'rewards': rewards.cpu(),
+                        'prompt_lens': prompt_lens_tensor.repeat_interleave(self.num_samples_per_prompt).cpu()
+                    })
+                if len(experience_buffer) == grad_accum_steps:
+                # A full effective batch is ready. Increment the global step counter.
+                    global_step += 1
                     
-                    with torch.no_grad():
-                        old_policy_logprobs_t = self.model(generated_sequences, attention_mask, masked_sequences, t, expanded_prompt_lens)
-                        ref_logprobs_t = self.ref_model(generated_sequences, attention_mask, masked_sequences, t, expanded_prompt_lens)
-                    
-                    policy_logprobs_t = self.model(generated_sequences, attention_mask, masked_sequences, t, expanded_prompt_lens)
-                    
-                    loss_t, mean_reward_t, _ = self.loss_fn(
-                        policy_logprobs=policy_logprobs_t, old_policy_logprobs=old_policy_logprobs_t,
-                        ref_logprobs=ref_logprobs_t, rewards=rewards,
-                        num_samples_per_prompt=self.num_samples_per_prompt
-                    )
-                    
-                    scaled_loss = loss_t / self.n_t
-                    self.strategy.backward(scaled_loss, self.model, self.optimizer)
+                    # Collate the buffered experience into large tensors on the current GPU
+                    device = self.model.model.device
+                    pad_id = self.tokenizer.pad_token_id
 
-                    batch_loss_sum += loss_t.item()
-                    batch_reward_sum += mean_reward_t.item()
+                    # 1) pull out all the (micro‑batch × k)×Li tensors
+                    seqs = [exp["sequences"] for exp in experience_buffer]
 
-                # Replicated logging/saving logic from your DPOTrainer
-                if step % self.strategy.accumulated_gradient == 0:
-                    self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
-                
-                    avg_loss = batch_loss_sum / self.n_t
-                    avg_reward = batch_reward_sum / self.n_t
+                    # 2) find the max L across them
+                    L_max = max(s.size(1) for s in seqs)
+
+                    # 3) pad each one on the right to length L_max
+                    padded_seqs = []
+                    for s in seqs:
+                        pad_len = L_max - s.size(1)
+                        if pad_len > 0:
+                            # F.pad takes (left, right) padding for last dim
+                            s = F.pad(s, (0, pad_len), value=pad_id)
+                        padded_seqs.append(s)
+
+                    # 4) concatenate along dim=0 and move to GPU
+                    full_sequences = torch.cat(padded_seqs, dim=0).to(device)
+                    full_rewards = torch.cat([exp['rewards'] for exp in experience_buffer], dim=0).to(device)
+                    full_prompt_lens = torch.cat([exp['prompt_lens'] for exp in experience_buffer], dim=0).to(device)
+                    full_attention_mask = (full_sequences != self.pad_id).long()
                     
-                    logs_dict = {"loss": avg_loss, "reward": avg_reward, "lr": self.scheduler.get_last_lr()[0]}
+                    # --- 3. Run Multi-Epoch Update on the Full Batch ---
+                    for ppo_epoch in range(ppo_epochs):
+                        self.model.train()
+                        
+                        # Pre-calculate the fixed 'old' logprobs for the entire accumulated batch
+                        with torch.no_grad():
+                            t_fixed = (1 - self.eps) * torch.rand(1).item() + self.eps
+                            _, masked_sequences_fixed, _ = self.forward_process(full_sequences, t_fixed)
+                            old_policy_logprobs_t_fixed = self.model(full_sequences, full_attention_mask, masked_sequences_fixed, t_fixed, full_prompt_lens)
+                            ref_logprobs_t_fixed = self.ref_model(full_sequences, full_attention_mask, masked_sequences_fixed, t_fixed, full_prompt_lens)
+
+                        # Accumulate gradients over the n_t Monte Carlo samples
+                        for _ in range(self.n_t):
+                            policy_logprobs_t = self.model(full_sequences, full_attention_mask, masked_sequences_fixed, t_fixed, full_prompt_lens)
+                            loss_t, mean_reward_t, _ = self.loss_fn(
+                                policy_logprobs=policy_logprobs_t,
+                                old_policy_logprobs=old_policy_logprobs_t_fixed,
+                                ref_logprobs=ref_logprobs_t_fixed,
+                                rewards=full_rewards,
+                                num_samples_per_prompt=self.num_samples_per_prompt
+                            )
+                            print(f"  [DEBUG] loss={loss_t.item():.6f}, reward={mean_reward_t:.6f}")
+                            scaled_loss = loss_t / self.n_t
+                            # DeepSpeed handles averaging gradients across GPUs automatically
+                            self.strategy.backward(scaled_loss, self.model, self.optimizer)
+                            total_norm = 0.0
+                            for p in self.model.parameters():
+                                if p.grad is not None:
+                                    total_norm += p.grad.data.norm().item()**2
+                            total_norm = total_norm**0.5
+                            print(f"  [DEBUG] grad norm={total_norm:.6f}")
+
+                        # Update the model weights after each PPO epoch
+                        self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
+
+                    # --- 4. Clear Buffer, Log, and Save Checkpoint ---
+                    experience_buffer.clear()
+                    logs_dict = {"loss": loss_t.item(), "reward": mean_reward_t.item(), "lr": self.scheduler.get_last_lr()[0]}
                     logs_dict = self.strategy.all_reduce(logs_dict)
                     step_bar.set_postfix(logs_dict)
-                    step_bar.update()
-                    global_step = step // self.strategy.accumulated_gradient
+                    
                     client_states = {"consumed_samples": global_step * args.train_batch_size}
                     self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
-                    if global_step % SAVE_EVERY == 0:
-                        ckpt_path = os.path.join(self.strategy.args.save_path, f"_GRPO_lora_ckpt_{global_step}")
-                        os.makedirs(ckpt_path, exist_ok=True)
-                        self.model.model.save_pretrained(ckpt_path)
-                        print(f"Saved LoRA checkpoint at step {global_step} to {ckpt_path}", flush=True)
-                        tag = "ds_checkpoint"
-                        if self.strategy.is_rank_0():
-                            print(f"Saving full DS checkpoint to {os.path.join(ckpt_path, tag)}")
-                        self.strategy.engine.save_checkpoint(
-                            ckpt_path,   # base dir
-                            client_state=client_states,  # your consumed_samples, etc.
-                            tag=tag
-                        )
                 
-                step += 1
-            epoch_bar.update()
+                step_bar.update(1)
+            epoch_bar.update(1)
+
+                # Replicated logging/saving logic from your DPOTrainer
+            #     if step % self.strategy.accumulated_gradient == 0:
+            #         self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
+                
+            #         avg_loss = batch_loss_sum / self.n_t
+            #         avg_reward = batch_reward_sum / self.n_t
+                    
+            #         logs_dict = {"loss": avg_loss, "reward": avg_reward, "lr": self.scheduler.get_last_lr()[0]}
+            #         logs_dict = self.strategy.all_reduce(logs_dict)
+            #         step_bar.set_postfix(logs_dict)
+            #         step_bar.update()
+            #         global_step = step // self.strategy.accumulated_gradient
+            #         client_states = {"consumed_samples": global_step * args.train_batch_size}
+            #         self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
+            #         if global_step % SAVE_EVERY == 0:
+            #             ckpt_path = os.path.join(self.strategy.args.save_path, f"_GRPO_lora_ckpt_{global_step}")
+            #             os.makedirs(ckpt_path, exist_ok=True)
+            #             self.model.model.save_pretrained(ckpt_path)
+            #             print(f"Saved LoRA checkpoint at step {global_step} to {ckpt_path}", flush=True)
+            #             tag = "ds_checkpoint"
+            #             if self.strategy.is_rank_0():
+            #                 print(f"Saving full DS checkpoint to {os.path.join(ckpt_path, tag)}")
+            #             self.strategy.engine.save_checkpoint(
+            #                 ckpt_path,   # base dir
+            #                 client_state=client_states,  # your consumed_samples, etc.
+            #                 tag=tag
+            #             )
+            #     step += 1
+            # epoch_bar.update()
 
     def _generate_and_score(self, batch):
         prompt = batch["prompt_texts"]
