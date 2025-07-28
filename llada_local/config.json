@@ -21,7 +21,7 @@
   "embedding_size": 126464,
   "eos_token_id": 126081,
   "flash_attention": true,
-  "flash_attention_version": "3",
+  "flash_attention_version": "2",
   "include_bias": false,
   "include_qkv_bias": false,
   "init_cutoff_factor": null,

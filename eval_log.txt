@@ -1,7 +1,0 @@
-4 GPUs on original parameters:
-    truthfulqa_mc2: 1 hr
-    arc_challenge: 15 min
-    hellaswag: 1.5 hr
-    mmlu: 7 min
-    gsm8k: 5hr
-    humaneval: 40min

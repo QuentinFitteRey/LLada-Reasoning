@@ -16,8 +16,7 @@ from lm_eval.api.registry import register_model
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer, AutoModel
-from new_generation import generate_with_dual_cache
-from generate import generate
+from generation import generate_with_dual_cache
 from init_model import init_model
 from accelerate import Accelerator
 
@@ -27,6 +26,7 @@ import json
 import datetime
 import os
 from contextlib import redirect_stdout
+from functools import partial
 
 
 def set_seed(seed):
@@ -37,23 +37,30 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-
 @register_model("llada_dist")
 class LLaDAEvalHarness(LM):
     def __init__(
         self,
-        model_path='',
+        model_path: str = "./llada_local",
+        adapter_path: str | None = None,
+        load_lora: bool = False,
+        model_path: str = "./llada_local",
+        adapter_path: str | None = None,
+        load_lora: bool = False,
         mask_id=126336,
-        max_length=4096,
+        max_length=8192,
         batch_size=32,
         mc_num=128,
         is_check_greedy=True,
         cfg=0.,
         steps=1024,
         gen_length=1024,
-        block_length=1024,
+        block_length=128,
         remasking='low_confidence',
         device="cuda",
+        generate_batch_size=1,
+        repetition_penalty=1.2,
+        use_thinking=True,
         **kwargs,
     ):
         '''
@@ -74,6 +81,13 @@ class LLaDAEvalHarness(LM):
             cfg_scale: Unsupervised classifier-free guidance scale.
         '''
         super().__init__()
+        self.model_path = model_path
+        self.adapter_path = adapter_path
+        self.load_lora = load_lora
+        self.task = os.environ.get("EVAL_TASKS", None)
+        self.generate_batch_size = generate_batch_size
+        self.repetition_penalty = repetition_penalty
+        self.use_thinking = use_thinking
 
         accelerator = accelerate.Accelerator()
         if accelerator.num_processes > 1:
@@ -85,21 +99,37 @@ class LLaDAEvalHarness(LM):
         if self.accelerator is not None:
             model_kwargs.update({'device_map': {'': f'{self.accelerator.device}'}})
 
-        print(f"[LLaDAEvalHarness] Loading model from: {model_path}")
-        model, tokenizer = init_model()
-        model = model.to(device)
+        print(f"[LLaDAEvalHarness] Loading model from: {self.model_path}"
+              f"{' + adapter=' + self.adapter_path if self.adapter_path else ''}"
+              f" (LoRA={'yes' if self.load_lora else 'no'})")
+        model, tokenizer = init_model(
+            model_path=self.model_path,
+            adapter_path=self.adapter_path,
+            load_lora=self.load_lora,
+            # device=device,
+            torch_dtype=torch.bfloat16,
+        )
+        # model = model.to(device)
         self.model = model
+        # Pad on the left for generation
+        tokenizer.padding_side = "left"
         self.tokenizer = tokenizer
         self.model.eval()
+        print("number of steps:", steps)
+        print("gen_length:", gen_length)
+        print("block_length:", block_length)
+        print("remasking:", remasking)
 
-        self.device = torch.device(device)
+
+        # self.device = torch.device(device)
         if self.accelerator is not None:
             self.model = self.accelerator.prepare(self.model)
             self.device = torch.device(f'{self.accelerator.device}')
             self._rank = self.accelerator.local_process_index
             self._world_size = self.accelerator.num_processes
-        else: 
-            self.model = self.model.to(device)
+        else:
+            self.device = torch.device(device)
+            self.model = self.model.to(self.device)
 
         self.mask_id = mask_id
 
@@ -237,6 +267,18 @@ class LLaDAEvalHarness(LM):
         ds = ds.with_format("torch")
         prompt_len = [len(x["prefix"]) + len(x["target"]) for x in ds]
 
+        # Truncate sequences longer than max_length
+        if max(prompt_len) > 4096:
+            print(f"[Warning] Some sequences are longer than 4096 tokens, truncating to 4096.")
+            ds = ds.map(
+                lambda x: {
+                    "prefix": x["prefix"][:4096],
+                    "target": x["target"][:4096 - len(x["prefix"])],
+                },
+                batched=False,
+            )
+            prompt_len = [len(x["prefix"]) + len(x["target"]) for x in ds]
+
         assert max(prompt_len) <= 4096
 
         out = []
@@ -256,49 +298,196 @@ class LLaDAEvalHarness(LM):
     def loglikelihood_rolling(self, requests):
         raise NotImplementedError
 
-    def generate_until(self, requests: list[Instance]):
-        def _tokenize(e):
-            return {
-                "question": self.tokenizer(e["question"])["input_ids"],
-                "question_text": e["question"],
-                "until": e["until"],
-            }
+    def llada_generate_until_tokenize(self, e, idx, tokenizer):
+        return {
+            "question": tokenizer(e["question"])["input_ids"],
+            "question_text": e["question"],
+            "until": e["until"],
+        }
+
+    def generate_until_not_batched(self, requests: list[Instance]):
+
+        thinking_mode = """You must think step by step and provide detailed thinking on the problem before giving the final answer.\nYou must put your thinking process between <think> and </think> tags and then output the final answer with a summary of your thinking process.\nIn your thinking process, this requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop a well-considered thinking process."""
+        not_thinking_mode = """You are not required to have detailed thinking on the problem between <think> and </think> tags.\nYou can provide a direct answer to the question without detailed thinking.\nYou can still take steps to solve the problem, but you do not need to provide detailed thinking on the problem."""
+
+        if requests:
+            self.task = getattr(requests[0], "task_name", "unknown")
+
+        print(f"[LLaDAEvalHarness] Generating with task: {self.task}")
 
         ds = [{"question": req.args[0], "until": req.args[1]['until']} for req in requests]
         ds = Dataset.from_list(ds)
-        ds = ds.map(_tokenize)
+        ds = ds.map(
+            self.llada_generate_until_tokenize,
+            fn_kwargs={"tokenizer": self.tokenizer},
+            batched=False,
+            with_indices=True,
+        )
         ds = ds.with_format("torch")
 
         out = []
         for elem in tqdm(ds, desc="Generating..."):
-            prompt = elem["question"].unsqueeze(0).to(self.device)
-            stop_tokens = elem["until"]
- 
-            generated_answer, _ = generate_with_dual_cache(self.model, prompt, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length,
-        temperature=0.0, remasking='low_confidence')
-            # print(f"--- Debug Info for Request ---")
-            # print(f"Prompt shape: {prompt.shape}")
-            # print(f"Generated output tensor shape (from `generate`): {generated_answer.shape}")
-            # print(f"Expected generated part start index (prompt.shape[1]): {prompt.shape[1]}")
 
-            # # Check if the slice is empty
-            # if generated_answer.shape[1] <= prompt.shape[1]:
-            #     print("WARNING: Generated output tensor is not longer than the prompt! No new tokens were generated.")
-            
-            generated_answer = self.tokenizer.decode(generated_answer[0][prompt.shape[1]:], skip_special_tokens=False)
-            for stop_seq in stop_tokens:
-                    if stop_seq in generated_answer:
-                        generated_answer = generated_answer.split(stop_seq)[0]
+            # Concatenate the thinking mode or not thinking mode with the question_text
+            if self.use_thinking:
+                question_text = f"{thinking_mode}\n{elem['question_text']}"
+            else:
+                question_text = f"{not_thinking_mode}\n{elem['question_text']}"
 
-            # remove special tokens
-            generated_answer_ids = self.tokenizer(generated_answer)["input_ids"]
-            generated_answer = self.tokenizer.decode(generated_answer_ids, skip_special_tokens=True)
-            out.append(generated_answer)
+            # wrap the question in a chat template
+            raw = question_text
+            chat_history = [{"role":"user","content": raw}]
+            prompt_str = self.tokenizer.apply_chat_template(
+                chat_history,
+                tokenize=False,
+                add_generation_prompt=True
+            )
 
-            self.accelerator.wait_for_everyone()
+            # tokenize
+            prompt_ids = self.tokenizer(prompt_str)["input_ids"]
+            prompt = torch.tensor([prompt_ids], device=self.device)
+
+            # generate with dual cache
+            generated_ids, _ = generate_with_dual_cache(
+                self.model,
+                prompt,
+                steps=self.steps,
+                gen_length=self.gen_length,
+                block_length=self.block_length,
+                temperature=0.0,
+                remasking="low_confidence",
+                threshold=0.9,
+                repetition_penalty=1.0,
+            )
+
+            # strip off the prompt tokens and decode
+            gen_part = generated_ids[0, len(prompt_ids) :]
+            text = self.tokenizer.decode(gen_part, skip_special_tokens=False)
+
+            # stop‐token trimming
+            stop_token = "<|eot_id|>"
+            if stop_token in text:
+                text = text[: text.index(stop_token)]
+
+            # remove any stray special tokens
+            final_ids = self.tokenizer(text)["input_ids"]
+            clean = self.tokenizer.decode(final_ids, skip_special_tokens=True)
+
+            # print("----- PROMPT BEGIN -----", file=sys.stderr)
+            # print(prompt_str, file=sys.stderr)
+            # print("------ PROMPT END ------\n", file=sys.stderr)
+            # print("----- GENERATED BEGIN ----", file=sys.stderr)
+            # print(text, file=sys.stderr)
+            # print("------ GENERATED END -----\n", file=sys.stderr)
+            # print("----- ANSWER BEGIN ----", file=sys.stderr)
+            # print(clean, file=sys.stderr)
+            # print("------ ANSWER END -----", file=sys.stderr)
+
+            out.append(clean)
+
+            if self.accelerator is not None:
+                self.accelerator.wait_for_everyone()
 
         return out
+    
+    def generate_until(self, requests: list[Instance]):
 
+        thinking_mode = """You must think step by step and provide detailed thinking on the problem before giving the final answer.\nYou must put your thinking process between <think> and </think> tags and then output the final answer with a summary of your thinking process.\nIn your thinking process, this requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop a well-considered thinking process."""
+        # thinking_mode = """Your role as an assistant involves thoroughly exploring questions through a systematic long thinking process before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop well-considered thinking process. Please structure your response into two main sections: Thought and Solution. In the Thought section, detail your reasoning process using the specified format: <|begin_of_thought|> {thought with steps separated with '\n\n'} <|end_of_thought|> Each step should include detailed considerations such as analisying questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, explorations, and reflections from the Thought section, systematically present the final solution that you deem correct. The solution should remain a logical, accurate, concise expression style and detail necessary step needed to reach the conclusion, formatted as follows: <|begin_of_solution|> {final formatted, precise, and clear solution} <|end_of_solution|> Now, try to solve the following question through the above guidelines:"""
+        not_thinking_mode = """"""
+
+        if requests:
+            self.task = getattr(requests[0], "task_name", "unknown")
+
+        print(f"[LLaDAEvalHarness] Generating with task: {self.task}")
+        print(f"self.use_thinking = {self.use_thinking}")
+        print(f"slef.repetition_penalty = {self.repetition_penalty}")
+
+        ds = [{"question": req.args[0], "until": req.args[1]['until']} for req in requests]
+        ds = Dataset.from_list(ds)
+        ds = ds.map(
+            self.llada_generate_until_tokenize,
+            fn_kwargs={"tokenizer": self.tokenizer},
+            batched=False,
+            with_indices=True,
+        )
+        ds = ds.with_format("torch")
+
+        # Batched generation
+        all_prompts: list[list[int]] = []
+        raw_texts: list[str]     = []
+
+        # Make sure the padding is on the left
+        self.tokenizer.padding_side = "left"
+
+        for elem in tqdm(ds, desc="Preparing prompts..."):
+            # reconstruct the engineered prompt here
+            if self.use_thinking:
+                q = f"{thinking_mode}\n{elem['question_text']}"
+            else:
+                q = f"{not_thinking_mode}\n{elem['question_text']}"
+            prompt_str = self.tokenizer.apply_chat_template(
+                [{"role":"user","content": q}],
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            ids = self.tokenizer(prompt_str)["input_ids"]
+            all_prompts.append(ids)
+            raw_texts.append(prompt_str)
+
+        out = []
+        for i in tqdm(range(0, len(all_prompts), self.generate_batch_size), desc="Generating..."):
+            batch_texts = raw_texts[i : i + self.generate_batch_size]
+
+            # this will give you input_ids padded to the longest in the batch
+            enc = self.tokenizer(
+                batch_texts,
+                padding=True,               # pad to longest
+                return_tensors="pt",        # give PyTorch tensors
+                add_special_tokens=False    # we already called apply_chat_template
+            )
+            input_ids    = enc["input_ids"].to(self.device)
+            attention_mask = enc.get("attention_mask", None)
+
+            # one batched call
+            generated, _ = generate_with_dual_cache(
+                self.model,
+                input_ids,
+                steps=self.steps,
+                gen_length=self.gen_length,
+                block_length=self.block_length,
+                temperature=0.0,
+                remasking=self.remasking,
+                threshold=0.9,
+                repetition_penalty=self.repetition_penalty
+            )
+
+            # extract each example’s generation
+            # we find out how many real (non‑pad) tokens there were
+            if attention_mask is not None:
+                prompt_lens = attention_mask.sum(dim=1)
+            else:
+                prompt_lens = torch.tensor([input_ids.shape[1]] * input_ids.shape[0],
+                                        device=input_ids.device)
+
+            for j, plen in enumerate(prompt_lens):
+                start = plen.item()
+                gen_ids = generated[j, start:]
+                text = self.tokenizer.decode(gen_ids, skip_special_tokens=False)
+
+                print(f"answer: \n {text}")
+
+                # trim at the stop token
+                if "<|eot_id|>" in text:
+                    text = text[: text.index("<|eot_id|>")]
+
+                # re‑tokenize+decode to strip any stray special tokens
+                final_ids = self.tokenizer(text)["input_ids"]
+                clean     = self.tokenizer.decode(final_ids, skip_special_tokens=True)
+
+                out.append(clean)
+
+        return out
 
 if __name__ == "__main__":
     set_seed(1234)
