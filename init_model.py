@@ -2,11 +2,13 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 from peft import PeftModel, PeftConfig, LoraConfig, get_peft_model_state_dict, set_peft_model_state_dict
+import os
 
-def init_model(lora=False):
+adapter_path = os.path.expanduser("~/scratch/LLaDA_checkpoints/test_checkpoint")
+
+def init_model(lora=True):
     # Path to your local directory containing the modified model
-    local_model_path = "/home/hice1/qfitterey3/scratch/LLada-Reasoning/llada_local_1.5" 
-    local_model_tokenizer_path = "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-600"
+    local_model_path = "./llada_local_trained"  # Adjust this path as needed
 
     print(f"Loading tokenizer from: {local_model_tokenizer_path}")
     tokenizer = AutoTokenizer.from_pretrained(local_model_path, use_fast=True, local_files_only=True)
@@ -21,6 +23,7 @@ def init_model(lora=False):
         # device_map="auto",
         # load_in_8bit=True 
         local_files_only=True,  # Ensure it loads from local files only
+        attn_implementation = "flash_attention_2"
     )
     print("Model loaded successfully with local modifications.")
     print(model)
@@ -42,8 +45,7 @@ def init_model(lora=False):
         lora_config = PeftConfig.from_pretrained(
             "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-600/sft_adapter"
         )
-        print("Loading LoRA configuration...")
-        model = PeftModel.from_pretrained(model, "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-600/sft_adapter", lora_config=lora_config)
+        model = PeftModel.from_pretrained(model, adapter_path, lora_config=lora_config)
         print("LoRA model loaded successfully.")
     return model, tokenizer
 

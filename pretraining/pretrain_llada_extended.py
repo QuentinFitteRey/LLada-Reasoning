@@ -24,11 +24,11 @@ from torch.nn.utils.rnn import pad_sequence
 
 # --- (Parser definition remains the same as your last version) ---
 parser = argparse.ArgumentParser(description="Fine-tune LLaDA for extended context")
-parser.add_argument("--train-data",          type=str, required=False, help="Path to the training data file", default="./data_pretrain/train.txt")
-parser.add_argument("--val-data",            type=str, required=False, help="Path to the validation data file", default="./data_pretrain/val.txt")
-parser.add_argument("--output-dir",          type=str, default="./checkpoints/checkpoints_llada_pretrain_8k_clip_lr15_betterval_128", help="Directory to save checkpoints and final model.")
+parser.add_argument("--train-data",          type=str, required=False, help="Path to the training data file", default="./data_pretrain_stratified/train_new.txt")
+parser.add_argument("--val-data",            type=str, required=False, help="Path to the validation data file", default="./data_pretrain_stratified/val_new.txt")
+parser.add_argument("--output-dir",          type=str, default="./checkpoints/checkpoints_llada_pretrain_8k_clip_lr15_betterval_128_good_newdata", help="Directory to save checkpoints and final model.")
 parser.add_argument("--pretrained-model",    type=str, required=False, help="Path to the base model to fine-tune", default="./llada_local")
-parser.add_argument("--resume-from-checkpoint", type=str, default=None, help="Path to a checkpoint directory to resume training from.")
+parser.add_argument("--resume-from-checkpoint", type=str, default="", help="Path to a checkpoint directory to resume training from.")
 parser.add_argument("--batch-size",          type=int, default=64, help="Global batch size (for gradient accumulation)")
 parser.add_argument("--local-batch",         type=int, default=8, help="Local batch size (per-device)")
 parser.add_argument("--seq-len",             type=int, default=8192, help="Maximum sequence length for training (will truncate longer sequences)")
@@ -219,7 +219,7 @@ def main():
         if args.resume_from_checkpoint:
             if is_main_process:
                 print(f"Resuming training by loading LoRA adapter from: {args.resume_from_checkpoint}")
-            model = PeftModel.from_pretrained(model, args.resume_from_checkpoint)
+            model = PeftModel.from_pretrained(model, args.resume_from_checkpoint, is_trainable=True)
         else:
             if is_main_process: print("LoRA enabled. Preparing model for PEFT...")
             lora_config = LoraConfig(
@@ -271,15 +271,17 @@ def main():
         if os.path.exists(trainer_state_path):
             if is_main_process:
                 print(f"Loading trainer state from {trainer_state_path}")
-            state = torch.load(trainer_state_path, map_location=device)
+            state = torch.load(trainer_state_path, map_location="cpu")
             opt.load_state_dict(state["optimizer"])
             sch.load_state_dict(state["scheduler"])
+            for opt_state in opt.state.values():
+                for k, v in opt_state.items():
+                    if isinstance(v, torch.Tensor):
+                        opt_state[k] = v.to(device)
             global_step = state["global_step"]
             start_epoch = state["epoch"]
-            rng_state_cpu = state["rng_state_cpu"].to(torch.device("cpu"))
-            rng_state_gpu = state["rng_state_gpu"].to(device)
-            torch.set_rng_state(rng_state_cpu)
-            torch.cuda.set_rng_state(rng_state_gpu)
+            torch.set_rng_state(state["rng_state_cpu"])
+            torch.cuda.set_rng_state(state["rng_state_gpu"], device=device)
             if is_main_process:
                 print(f"Resumed training from Step {global_step} at Epoch {start_epoch}.")
         else:
@@ -309,7 +311,6 @@ def main():
     
     # Add a barrier here to prevent the deadlock
     dist.barrier()
-
     if is_main_process: print("Starting fine-tuning...")
     
     model.train()

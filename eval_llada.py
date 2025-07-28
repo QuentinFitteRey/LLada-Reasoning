@@ -18,7 +18,7 @@ from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer, AutoModel
 from new_generation import generate_with_dual_cache
 from generate import generate
-from init_model_new import init_model
+from init_model import init_model
 from accelerate import Accelerator
 
 import io
@@ -28,6 +28,7 @@ import datetime
 import os
 from contextlib import redirect_stdout
 from functools import partial
+
 
 
 def set_seed(seed):
@@ -82,6 +83,7 @@ class LLaDAEvalHarness(LM):
         self.load_lora = load_lora
         self.task = os.environ.get("EVAL_TASKS", None)
 
+
         accelerator = accelerate.Accelerator()
         if accelerator.num_processes > 1:
             self.accelerator = accelerator
@@ -110,6 +112,7 @@ class LLaDAEvalHarness(LM):
         print("gen_length:", gen_length)
         print("block_length:", block_length)
         print("remasking:", remasking)
+
 
         self.device = torch.device(device)
         if self.accelerator is not None:
@@ -331,6 +334,7 @@ class LLaDAEvalHarness(LM):
             batched=False,
             with_indices=True,
         )
+
         ds = ds.with_format("torch")
 
         out = []
