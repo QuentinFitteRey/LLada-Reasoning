@@ -439,6 +439,9 @@ class RotaryEmbedding(nn.Module):
         x1, x2 = x.unbind(dim=-2)
         return torch.cat((-x2, x1), dim=-1)
 
+    # def apply_rotary_pos_emb(self, pos_sin: torch.Tensor, pos_cos: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    #     return ((t * pos_cos) + (self.rotate_half(t) * pos_sin)).to(t.dtype)
+
     def apply_rotary_pos_emb(self, pos_sin: torch.Tensor, pos_cos: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         # t: (B, H, T, D)
         # pos_sin: (1, 1, T, D) or smaller
@@ -862,6 +865,9 @@ class LLaDABlock(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, T, C = q.size()  # batch size, sequence length, d_model
         dtype = k.dtype
+
+        # if attention_bias is not None:
+        #     print(f"attention_bias: \n {attention_bias}")
 
         # Optionally apply layer norm to keys and queries.
         if self.q_norm is not None and self.k_norm is not None: #self.q_norm: None, self.k_norm: None

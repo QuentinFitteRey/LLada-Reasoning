@@ -204,6 +204,7 @@ checkpoints/
 wandb/
 data_pretrain/
 data_pretrain_stratified/
+dpo_checkpoints_lora/
 evaluate_logs/
 eval_logs/
 test_logs/
