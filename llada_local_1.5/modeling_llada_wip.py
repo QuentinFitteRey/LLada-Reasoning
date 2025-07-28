@@ -430,9 +430,6 @@ class RotaryEmbedding(nn.Module):
         x1, x2 = x.unbind(dim=-2)
         return torch.cat((-x2, x1), dim=-1)
 
-    # def apply_rotary_pos_emb(self, pos_sin: torch.Tensor, pos_cos: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-    #     return ((t * pos_cos) + (self.rotate_half(t) * pos_sin)).to(t.dtype)
-
     def apply_rotary_pos_emb(self, pos_sin: torch.Tensor, pos_cos: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         # t: (B, H, T, D)
         # pos_sin: (1, 1, T, D) or smaller
@@ -442,40 +439,13 @@ class RotaryEmbedding(nn.Module):
             pos_cos = pos_cos.expand(t.shape[0], -1, -1, -1)
         return ((t * pos_cos) + (self.rotate_half(t) * pos_sin)).to(t.dtype)
 
-
-    # def forward(self, q: torch.Tensor, k: torch.Tensor, block_end_index: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-    #     if self.config.rope_full_precision:
-    #         q_, k_ = q.float(), k.float()
-    #     else:
-    #         q_, k_ = q, k
-
-    #     with torch.autocast(q.device.type, enabled=False):
-    #         query_len, key_len = q_.shape[-2], k_.shape[-2]  # could be different if layer_past not None
-    #         pos_sin, pos_cos = self.get_rotary_embedding(key_len, q_.device)
-    #         pos_sin = pos_sin.type_as(q_)
-    #         pos_cos = pos_cos.type_as(q_)
-    #         if block_end_index is None:
-    #             q_ = self.apply_rotary_pos_emb(
-    #                 pos_sin[:, :, key_len - query_len : key_len, :],
-    #                 pos_cos[:, :, key_len - query_len : key_len, :],
-    #                 q_,
-    #             )
-    #         else:
-    #             q_ = self.apply_rotary_pos_emb(
-    #                 pos_sin[:, :, block_end_index.item() - query_len : block_end_index.item(), :],
-    #                 pos_cos[:, :, block_end_index.item() - query_len : block_end_index.item(), :],
-    #                 q_,
-    #             )
-    #         k_ = self.apply_rotary_pos_emb(pos_sin, pos_cos, k_)
-    #     return q_.type_as(q), k_.type_as(k)
-
     def forward(self, q, k, block_end_index=None):
         q_, k_ = (q.float(), k.float()) if self.config.rope_full_precision else (q, k)
 
         query_len, key_len = q_.shape[-2], k_.shape[-2]
         pos_sin, pos_cos = self.get_rotary_embedding(key_len, q_.device)
 
-        # NEW: The code in the 'else' block is moved up and modified
+        # The code in the 'else' block is moved up and modified
         if block_end_index is not None:
             # BATCHED RoPE application for `q`
             # block_end_index is now shape (B,)
@@ -510,7 +480,7 @@ class RotaryEmbedding(nn.Module):
 
         # Key rotation is unchanged, it applies to the whole key cache
         k_ = self.apply_rotary_pos_emb(pos_sin[:, :, :key_len, :], pos_cos[:, :, :key_len, :], k_)
-        
+
         return q_.type_as(q), k_.type_as(k)
 
 class YarnRotaryEmbedding(nn.Module):
@@ -579,24 +549,24 @@ class YarnRotaryEmbedding(nn.Module):
         if self.inv_freq.device != q_.device:
             self.inv_freq = self.inv_freq.to(q_.device)
         
-        # 1) figure out the real lengths
+        # figure out the real lengths
         full_len = k.shape[-2]
         query_len = q.shape[-2]
 
         with torch.autocast(q.device.type, enabled=False):
-            # 2) build sin/cos for the *full* key length
+            # build sin/cos for the *full* key length
             pos_sin_full, pos_cos_full = self.get_rotary_embedding(full_len, k_.device)
             pos_sin_full = pos_sin_full.type_as(k_)
             pos_cos_full = pos_cos_full.type_as(k_)
 
-            # 3) carve out the right window for the queries
+            # carve out the right window for the queries
             if seq_len_override is not None:
-                # if you’re replacing the last N positions, only rotate those N tokens with the
-                # old “tail” of your cache
+                # if replacing the last N positions, only rotate those N tokens with the
+                # old "tail" of the cache
                 start = seq_len_override - query_len
                 end = seq_len_override
             else:
-                # the usual streaming case: the *new* queries sit at the very end of the cache
+                # the usual streaming case: the new queries sit at the very end of the cache
                 start = full_len - query_len
                 end = full_len
 
@@ -619,9 +589,6 @@ class YarnRotaryEmbedding(nn.Module):
 
         self.inv_freq = inv_freq
         self.mscale = float(self.get_mscale(self.scale) * self.attn_factor) # Get n-d magnitude scaling corrected for interpolation
-
-        # self.inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, device=device, dtype=torch.float) / self.dim))
-        # self.mscale = 1.0  # Default to 1.0 if no scaling is applied
 
     # Inverse dim formula to find dim based on number of rotations
     def find_correction_dim(self, num_rotations, dim, base=10000.0, max_position_embeddings=4000):
@@ -857,9 +824,6 @@ class LLaDABlock(nn.Module):
         attention mask if passed, and applying dropout if a probability greater than 0.0 is specified.
         """
 
-        # if attn_mask is not None:
-        #     print(f"attn_mask: \n {attn_mask}")
-
         if self.flash_attn_func is not None and attn_mask is None:
             r = self.flash_attn_func(
                 q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), dropout_p=dropout_p, causal=False
@@ -899,9 +863,6 @@ class LLaDABlock(nn.Module):
         B, T, C = q.size()  # batch size, sequence length, d_model
         dtype = k.dtype
 
-        # if attention_bias is not None:
-        #     print(f"attention_bias: \n {attention_bias}")
-
         # Optionally apply layer norm to keys and queries.
         if self.q_norm is not None and self.k_norm is not None: #self.q_norm: None, self.k_norm: None
             q = self.q_norm(q).to(dtype=dtype)
@@ -927,19 +888,18 @@ class LLaDABlock(nn.Module):
                 # past_key shape is [B, n_kv_h, L, hs]
                 # Replace selected_length number of 1s in past_key with k
                 # Get the indices that need to be replaced
-                # replace_indices = replace_position.nonzero(as_tuple=True)[1]  # [selected_length]
                 # Use scatter operation to perform replacement
                 for b in range(B):
                     idxs = replace_position[b].nonzero(as_tuple=True)[0]   # e.g. [16] indices
-                    past_key[b, :, idxs] = k[b]                          # shapes now line up
+                    past_key[b, :, idxs] = k[b].to(past_key.dtype)
                 k = past_key
                 # Perform the same operation for value
                 for b in range(B):
                     idxs = replace_position[b].nonzero(as_tuple=True)[0]
-                    past_value[b, :, idxs] = v[b]
+                    past_value[b, :, idxs] = v[b].to(past_value.dtype)
                 v = past_value
 
-        present = (k, v) if use_cache else None #present: None
+        present = (k, v) if use_cache else None # present: None
         query_len, key_len = q.shape[-2], k.shape[-2]  # could be different if layer_past not None
 
         if self.config.rope:
@@ -947,7 +907,7 @@ class LLaDABlock(nn.Module):
             if replace_position is None:
                 q, k = self.rotary_emb(q, k)
             else:
-                # FIX: Calculate the max index for EACH item in the batch
+                # Calculate the max index for each item in the batch
                 L = replace_position.shape[1]
                 # Creates a tensor of column indices like [[0, 1, ..., L-1], ...]
                 col_indices = torch.arange(L, device=replace_position.device).unsqueeze(0)

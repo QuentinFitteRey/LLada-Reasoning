@@ -16,14 +16,14 @@ SBATCH_OPTS="
   --nodes=1
   --ntasks-per-node=1
   --gres=gpu:H200:4
-  --time=2:00:00
+  --time=4:00:00
   --mem=1024G
   --cpus-per-task=8
   --tmp=1000G
   --mail-user=jmoutahir3@gatech.edu
   --mail-type=BEGIN,END
-  --output=/home/hice1/jmoutahir3/scratch/LLada-Reasoning/evaluate_logs/llada_sft/full_logs/%x.out
-  --error=/home/hice1/jmoutahir3/scratch/LLada-Reasoning/evaluate_logs/llada_sft/full_logs/%x.err
+  --output=/home/hice1/jmoutahir3/scratch/LLada-Reasoning/evaluate_logs/llada_sft/full_logs_1.5vanilla_1024/%x.out
+  --error=/home/hice1/jmoutahir3/scratch/LLada-Reasoning/evaluate_logs/llada_sft/full_logs_1.5vanilla_1024/%x.err
 "
 
 # -------------------
@@ -31,29 +31,38 @@ SBATCH_OPTS="
 # -------------------
 TASKS=( \
   gsm8k \
-  # mmlu \
-  # mmlu_pro \
-  # arc_easy \
-  # arc_challenge \
-  # hellaswag \
+  mmlu \
+  mmlu_pro \
+  arc_easy \
+  arc_challenge \
+  hellaswag \
   # hendrycks_math \
-  # humaneval \
-  # ifeval \
-  # gpqa \
+  humaneval \
+  ifeval \
+  gpqa \
   # mbpp \
+  truthfulqa_mc2 \
+  winogrande \
+  piqa \
+  # cmmlu \
+  # ceval-valid \
+  bbh \
+  # minerva_math \
 )
 
 # -----------------------------
 # Default per‐task parameters
 # -----------------------------
-DEFAULT_LIMIT=64
+DEFAULT_LIMIT=256
 DEFAULT_FEWSHOT=5
-DEFAULT_BATCHSIZE=4
+DEFAULT_BATCHSIZE=1
 DEFAULT_CONFIRM_UNSAFE=""      # e.g. "--confirm_run_unsafe_code"
-DEFAULT_MODEL_ARGS="model_path=/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5,cfg=0.,is_check_greedy=False,mc_num=128,gen_length=256,steps=256,block_length=16,temperature=0.0,generate_batch_size=${DEFAULT_BATCHSIZE}"
-# MODEL_PATH="/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5"
-# ADAPTER_PATH="/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/final/final/sft_adapter"
-# DEFAULT_MODEL_ARGS="model_path=${MODEL_PATH},adapter_path=${ADAPTER_PATH},load_lora=True,cfg=0.5,is_check_greedy=False,mc_num=5,gen_length=1024,steps=1024,block_length=128,temperature=0.0,generate_batch_size=${DEFAULT_BATCHSIZE}"
+REPETITION_PENALTY=1.0 # set to 1.0 to disable
+USE_THINKING=False
+DEFAULT_MODEL_ARGS="model_path=/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5,cfg=0.,is_check_greedy=False,mc_num=128,gen_length=1024,steps=1024,block_length=128,temperature=0.0,generate_batch_size=${DEFAULT_BATCHSIZE},repetition_penalty=${REPETITION_PENALTY},use_thinking=${USE_THINKING}"
+# MODEL_PATH="/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5_mod_yarn_and_8192"
+# ADAPTER_PATH="/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/exp_quentin_2507/step-1100/sft_adapter"
+# DEFAULT_MODEL_ARGS="model_path=${MODEL_PATH},adapter_path=${ADAPTER_PATH},load_lora=True,cfg=0.,is_check_greedy=False,mc_num=5,gen_length=1024,steps=1024,block_length=1024,temperature=0.0,generate_batch_size=${DEFAULT_BATCHSIZE},repetition_penalty=${REPETITION_PENALTY},use_thinking=${USE_THINKING}"
 
 # -------------------------------
 # Overrides for specific tasks
@@ -61,13 +70,17 @@ DEFAULT_MODEL_ARGS="model_path=/home/hice1/jmoutahir3/scratch/LLada-Reasoning/ll
 # How many examples of few‑shot
 declare -A OVERRIDE_FEWSHOT=(
   [mbpp]=3
+  [truthfulqa_mc2]=0
+  [piqa]=0
+  [bbh]=3
 )
 
 # Limit (number of docs) to run—e.g. you may want fewer examples for slow tasks
 declare -A OVERRIDE_LIMIT=(
-  [mmlu_pro]=8
-  [mbpp]=8
-  [gpqa]=8
+  [mmlu_pro]=32
+  [mbpp]=64
+  [gpqa]=64
+  [humaneval]=512
 )
 
 # Tasks flagged unsafe (HumanEval, MBPP)

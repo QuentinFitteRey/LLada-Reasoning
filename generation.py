@@ -61,9 +61,6 @@ def generate_with_dual_cache(
             device=prompt.device
         )
 
-    print(f"attention_mask: \n {full_attention_mask}")
-
-    # <-- change here to use batch_size -->
     x = torch.full(
         (batch_size, total_len),
         mask_id,
@@ -82,7 +79,7 @@ def generate_with_dual_cache(
         start = prompt_len + block_idx * block_length
         end = start + block_length
 
-        # —— PRIME CACHE FOR THIS BLOCK —— #
+        # ---- PRIME CACHE FOR THIS BLOCK ---- #
         output = model(
             input_ids     = x,
             attention_mask= full_attention_mask,
@@ -274,10 +271,10 @@ def get_transfer_index_vectorized(
         # if threshold is set, default k = full mask count, then drop below‐thr
         k = mask_index.sum(dim=1)  # (B,)
         above_thr = conf_vals >= threshold
-        # —— new line to always keep the top‐1 ——  
+        # new line to always keep the top‐1
         above_thr[:, 0] = True
 
-    # build a mask on the *sorted* positions: take top‐k in each row
+    # build a mask on the sorted positions: take top‐k in each row
     ar = torch.arange(S, device=device).unsqueeze(0).expand(B, S)  # (B,S)
     sorted_mask = (ar < k.unsqueeze(1)) & above_thr               # (B,S)
 
@@ -291,27 +288,30 @@ def main():
     device = 'cuda'
     model, tokenizer = init_model(
         model_path    = "/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5",
-        # adapter_path  = "/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/final/final/sft_adapter",
-        # load_lora     = True,
+        adapter_path  = "/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/exp_quentin_2507/step-1100/sft_adapter",
+        load_lora     = True,
         device        = device,
     )
     model = model.to(device)
 
-    # 1) Define your four prompts
+    thinking_mode = """Your role as an assistant involves thoroughly exploring questions through a systematic long thinking process before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop well-considered thinking process. Please structure your response into two main sections: Thought and Solution. In the Thought section, detail your reasoning process using the specified format: <|begin_of_thought|> {thought with steps separated with '\n\n'} <|end_of_thought|> Each step should include detailed considerations such as analisying questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, explorations, and reflections from the Thought section, systematically present the final solution that you deem correct. The solution should remain a logical, accurate, concise expression style and detail necessary step needed to reach the conclusion, formatted as follows: <|begin_of_solution|> {final formatted, precise, and clear solution} <|end_of_solution|> Now, try to solve the following question through the above guidelines:"""
+
+    # Define the prompts
     prompts = [
-        "Describe the process of fine‑tuning a CLIP model with LoRA on a small dataset.",
-        "Describe the process of fine‑tuning a CLIP model with LoRA on a small dataset.",
-        "Describe the process of fine‑tuning a CLIP model with LoRA on a small dataset.",
-        "Describe the process of fine‑tuning a CLIP model with LoRA on a small dataset.",
-        # "Explain how a Kalman filter works in the context of object tracking.",
-        # "What are the key benefits of using Yarn rotary embeddings over vanilla RoPE?",
-        # "A number consists of two digits. The digit in the tens place is three times the digit in the units place. If you reverse the digits, the new number is 36 less than the original number. What is the original number?",
+        "Describe the process of fine-tuning a CLIP model with LoRA on a small dataset.",
+        "Explain how a Kalman filter works in the context of object tracking.",
+        "What are the key benefits of using Yarn rotary embeddings over vanilla RoPE?",
+        "A number consists of two digits. The digit in the tens place is three times the digit in the units place. If you reverse the digits, the new number is 36 less than the original number. What is the original number?",
     ]
 
-    # Artificially make the batch size 8
-    # prompts = prompts * 2  # Repeat to make batch size 8
+    new_prompts = []
+    for prompt in prompts:
+        prpt = f"{thinking_mode}\n{prompt}"
+        new_prompts.append(prpt)
+    
+    prompts = new_prompts
 
-    # 2) Apply chat template to each, then batch‑tokenize (with padding)
+    # Apply chat template to each, then batch‑tokenize
     wrapped = []
     for p in prompts:
         msg = [{"role":"user","content": p}]
@@ -327,18 +327,16 @@ def main():
         return_tensors="pt",
     )
 
-    print(f"Attention Mask: \n {batch['attention_mask']}")
-
     input_ids = batch["input_ids"].to(device)
     attention_mask = batch["attention_mask"].to(device)
 
-    # 2.1) Print the input_ids for debugging
+    # Print the input_ids for debugging
     print("Input IDs:")
     for i, ids in enumerate(input_ids):
         print(f"Prompt {i+1}: {ids.tolist()}")
         print(f"Decoded: {tokenizer.decode(ids, skip_special_tokens=False)}")
 
-    # 3) Measure generation time
+    # Measure generation time
     t0 = torch.cuda.Event(enable_timing=True)
     t1 = torch.cuda.Event(enable_timing=True)
     t0.record()
@@ -346,10 +344,10 @@ def main():
         model,
         input_ids,
         attention_mask=attention_mask,
-        steps=256,
-        gen_length=256,
-        block_length=16,
-        temperature=0.7,
+        steps=2048,
+        gen_length=2048,
+        block_length=128,
+        temperature=0.0,
         remasking='low_confidence',
         threshold=0.9,
         repetition_penalty=1.2,
@@ -359,95 +357,13 @@ def main():
     elapsed = t0.elapsed_time(t1) / 1000.0
     print(f"Generation time: {elapsed:.2f}s, NFE: {nfe}")
 
-    # 4) Decode and print each result
+    # Decode and print each result
     gens = tokenizer.batch_decode(
         out[:, input_ids.shape[1]:],
         skip_special_tokens=False
     )
     for i, text in enumerate(gens, start=1):
         print(f"\n=== Prompt {i} ===\n{prompts[i-1]}\n\n→ Generation:\n{text}")
-
-# def main():
-#     device = 'cuda'
-#     model, tokenizer = init_model(
-#         model_path    = "/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5",
-#         adapter_path  = "/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/final/final/sft_adapter",
-#         load_lora     = True,
-#         device        = device,
-#     )
-#     model = model.to(device)
-
-#     # single “template” prompt for warm‑up + experiments
-#     single = "Explain how a Kalman filter works in the context of object tracking."
-
-#     # --- 0) WARM‑UP PASS (cache priming only) ---
-#     warm = tokenizer.apply_chat_template(
-#         [{"role":"user","content": single}],
-#         add_generation_prompt=True,
-#         tokenize=False
-#     )
-#     warm_ids = tokenizer([warm], return_tensors="pt", padding=True)["input_ids"].to(device)
-#     # one quick call to populate all caches
-#     _ , _ = generate_with_dual_cache(
-#         model,
-#         warm_ids,
-#         steps=256,
-#         gen_length=256,
-#         block_length=16,
-#         temperature=0.0,
-#         remasking='low_confidence',
-#         threshold=0.9,
-#         repetition_penalty=1.2,
-#     )
-
-#     # --- 1) Now run the real timing loop ---
-#     batch_sizes = [1, 4]#[1, 2]#, 4, 8, 16, 32, 64]
-#     print(f"{'batch':>5}  {'time (s)':>8}  {'NFE':>4}")
-#     print("-" * 24)
-
-#     for bs in batch_sizes:
-#         # build batch of size bs
-#         prompts = [single] * bs
-#         wrapped = [
-#             tokenizer.apply_chat_template(
-#                 [{"role":"user","content":p}],
-#                 add_generation_prompt=True,
-#                 tokenize=False
-#             )
-#             for p in prompts
-#         ]
-#         enc = tokenizer(wrapped, padding=True, return_tensors="pt")
-#         input_ids = enc["input_ids"].to(device)
-
-#         # time it
-#         t0 = torch.cuda.Event(enable_timing=True)
-#         t1 = torch.cuda.Event(enable_timing=True)
-#         torch.cuda.synchronize()
-#         t0.record()
-#         out, nfe = generate_with_dual_cache(
-#             model,
-#             input_ids,
-#             steps=256,
-#             gen_length=256,
-#             block_length=16,
-#             temperature=0.0,
-#             remasking='low_confidence',
-#             threshold=0.9,
-#             repetition_penalty=1.2,
-#         )
-#         t1.record()
-#         torch.cuda.synchronize()
-#         elapsed = t0.elapsed_time(t1) / 1000.0
-
-#         # decode and print
-#         gens = tokenizer.batch_decode(
-#             out[:, input_ids.shape[1]:],
-#             skip_special_tokens=False
-#         )
-#         for i, text in enumerate(gens, start=1):
-#             print(f"\n=== Prompt {i} ===\n{prompts[i-1]}\n\n→ Generation:\n{text}")
-
-#         print(f"{bs:5d}  {elapsed:8.3f}  {nfe:4d}")
 
 if __name__ == '__main__':
     main()

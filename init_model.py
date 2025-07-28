@@ -17,7 +17,7 @@ def init_model(
     attn_implementation: str = None,
     device_map: dict | str | None = "auto",
 ):
-    # Path to your local directory containing the modified model
+    # Path to the local directory containing the modified model
     local_model_path = model_path
 
     print(f"Loading tokenizer from: {local_model_path}")
@@ -30,7 +30,7 @@ def init_model(
     if load_lora:
         # Instruct + Reasoning special tokens
         special_tokens_to_add = {
-            "additional_special_tokens": ["<think>", "</think>"]
+            "additional_special_tokens": ["<|mdm_mask|>", "<|start_header_id|>", "<|end_header_id|>","<|eot_id|>","<|begin_of_thought|>","<|end_of_thought|>" "<|begin_of_solution|>", "<|end_of_solution|>"]
         }
     else:
         # Instruct special tokens only
@@ -41,6 +41,8 @@ def init_model(
     if tokenizer.pad_token is None:
         print("No pad token found, adding <|pad|> as pad token.")
         special_tokens_to_add["pad_token"] = "<|pad|>"
+
+    print(f"len(tokenizer): \n {len(tokenizer)}")
 
     # Add tokens to tokenizer
     tokenizer.add_special_tokens(special_tokens_to_add)
@@ -55,6 +57,8 @@ def init_model(
 
     # Resize embeddings of the entire PeftModel
     model.resize_token_embeddings(len(tokenizer))
+
+    print(f"len(tokenizer): \n {len(tokenizer)}")
 
     print("Model loaded successfully with local modifications.")
 
