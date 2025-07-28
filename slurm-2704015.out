@@ -1,0 +1,25 @@
+---------------------------------------
+Begin Slurm Prolog: Jul-20-2025 16:50:48
+Job ID:    2704015
+User ID:   qfitterey3
+Account:   coc
+Job name:  sft_redun.sh
+Partition: coc-cpu
+QOS:       coc-ice
+---------------------------------------
+👍 No checkpoint found. Starting a new training run.
+Submitted job 2704022 with args: 
+Submitted batch job 2704023
+Chained next job to run after job 2704022 finishes.
+---------------------------------------
+Begin Slurm Epilog: Jul-20-2025 16:50:48
+Job ID:        2704015
+User ID:       qfitterey3
+Account:       coc
+Job name:      sft_redun.sh
+Resources:     cpu=1,mem=4G,node=1
+Rsrc Used:     cput=00:00:00,vmem=0,walltime=00:00:00,mem=3120K,energy_used=0
+Partition:     coc-cpu
+QOS:           coc-ice
+Nodes:         atl1-1-02-003-19-1
+---------------------------------------

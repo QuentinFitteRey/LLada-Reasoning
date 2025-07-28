@@ -195,10 +195,21 @@ cython_debug/
 
 # Data files
 */data/*
-
+*.arrow
+*.parquet
+sft_training/stf_data/
+sft_training/sft_data_small_debug/
 
 checkpoints/
 wandb/
 data_pretrain/
-validation/
 data_pretrain_stratified/
+
+merged_model/
+sft_data/
+validation/
+eval_logs/
+evaluate_logs/
+filtered_conversational_dataset/
+filtered_conversational_dataset_4k/
+

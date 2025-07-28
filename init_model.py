@@ -10,9 +10,8 @@ def init_model(lora=True):
     # Path to your local directory containing the modified model
     local_model_path = "./llada_local_trained"  # Adjust this path as needed
 
-
-    print(f"Loading tokenizer from: {local_model_path}")
-    tokenizer = AutoTokenizer.from_pretrained(local_model_path)
+    print(f"Loading tokenizer from: {local_model_tokenizer_path}")
+    tokenizer = AutoTokenizer.from_pretrained(local_model_path, use_fast=True, local_files_only=True)
 
     print(f"Loading modified model from: {local_model_path}")
     model = AutoModelForCausalLM.from_pretrained(
@@ -27,16 +26,24 @@ def init_model(lora=True):
         attn_implementation = "flash_attention_2"
     )
     print("Model loaded successfully with local modifications.")
+    print(model)
+    # special_tokens_to_add = {
+    # "additional_special_tokens": ["<|mdm_mask|>", "<think>", "</think>"]
+    # }
+
+    # if tokenizer.pad_token is None:
+    #     special_tokens_to_add["pad_token"] = "<|pad|>"
+
+    # # Add tokens to tokenizer
+    # tokenizer.add_special_tokens(special_tokens_to_add)
+
+    # # Resize embeddings of the entire PeftModel
+    model.resize_token_embeddings(len(tokenizer))
+    print(len(tokenizer))
 
     if lora:
-        print("Loading LoRA configuration...")
-        lora_config = LoraConfig(
-            r=32,
-            lora_alpha=64,
-            lora_dropout=0.5,
-            bias="none",
-            task_type="CAUSAL_LM",
-            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"]  
+        lora_config = PeftConfig.from_pretrained(
+            "/home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-600/sft_adapter"
         )
         model = PeftModel.from_pretrained(model, adapter_path, lora_config=lora_config)
         print("LoRA model loaded successfully.")

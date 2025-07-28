@@ -1,3 +1,20 @@
+# Copyright 2025 NVIDIA CORPORATION & AFFILIATES
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+# Modified from LLaDA repos: https://github.com/ML-GSAI/LLaDA
+
 from __future__ import annotations
 
 import logging
@@ -20,7 +37,11 @@ from typing import (
 )
 from dataclasses import fields
 from typing import List, Optional, Tuple, Union
-
+try:
+    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+    FLEX_ATTN_AVAILABLE = True
+except:
+    FLEX_ATTN_AVAILABLE = False
 import torch
 import torch.backends.cuda
 import torch.nn as nn
@@ -55,6 +76,7 @@ __all__ = [
     "RMSLayerNorm",
     "GemmaRMSLayerNorm",
     "RotaryEmbedding",
+    "YarnRotaryEmbedding", # ADDED
     "Activation",
     "GELU",
     "ReLU",
@@ -69,6 +91,9 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
+@torch.compile()
+def scaled_dot_product_attention(q, k, v, mask=None, attn_mask=None, dropout_p=0.0, is_causal=False):
+    return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
 
 class ModuleType(StrEnum):
     in_module = "in"
@@ -87,6 +112,7 @@ def init_weights(
 ) -> None:
     """
     Initialize weights of a linear or embedding module.
+
     :param config: The model config.
     :param module: The linear or embedding submodule to initialize.
     :param d: The effective input dimensionality of the weights. This could be smaller than the actual dimensions
@@ -407,7 +433,7 @@ class RotaryEmbedding(nn.Module):
     def apply_rotary_pos_emb(self, pos_sin: torch.Tensor, pos_cos: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         return ((t * pos_cos) + (self.rotate_half(t) * pos_sin)).to(t.dtype)
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, q: torch.Tensor, k: torch.Tensor, block_end_index: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.config.rope_full_precision:
             q_, k_ = q.float(), k.float()
         else:
@@ -418,13 +444,145 @@ class RotaryEmbedding(nn.Module):
             pos_sin, pos_cos = self.get_rotary_embedding(key_len, q_.device)
             pos_sin = pos_sin.type_as(q_)
             pos_cos = pos_cos.type_as(q_)
-            q_ = self.apply_rotary_pos_emb(
-                pos_sin[:, :, key_len - query_len : key_len, :],
-                pos_cos[:, :, key_len - query_len : key_len, :],
-                q_,
-            )
+            if block_end_index is None:
+                q_ = self.apply_rotary_pos_emb(
+                    pos_sin[:, :, key_len - query_len : key_len, :],
+                    pos_cos[:, :, key_len - query_len : key_len, :],
+                    q_,
+                )
+            else:
+                q_ = self.apply_rotary_pos_emb(
+                    pos_sin[:, :, block_end_index.item() - query_len : block_end_index.item(), :],
+                    pos_cos[:, :, block_end_index.item() - query_len : block_end_index.item(), :],
+                    q_,
+                )
             k_ = self.apply_rotary_pos_emb(pos_sin, pos_cos, k_)
         return q_.type_as(q), k_.type_as(k)
+
+
+# ADDED: YarnRotaryEmbedding class from the second model
+class YarnRotaryEmbedding(nn.Module):
+    def __init__(self, config: ModelConfig, cache: BufferCache):
+        super().__init__()
+        self.config = config
+        self.__cache = cache
+        self.dim = config.d_model // config.n_heads
+        self.max_position_embeddings = config.max_sequence_length
+        self.base = config.rope_theta
+        self.scale = config.yarn_scale
+        self.original_max_position_embeddings = config.yarn_original_max_position_embeddings
+        self.extrapolation_factor = config.yarn_extrapolation_factor
+        self.attn_factor = config.yarn_attn_factor
+        self.beta_fast = config.yarn_beta_fast
+        self.beta_slow = config.yarn_beta_slow
+        # Warm up cache.
+        self.yarn(_non_meta_init_device(config))
+        self.get_rotary_embedding(config.max_sequence_length, _non_meta_init_device(config))
+
+    def get_rotary_embedding(self, seq_len: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        if (
+            (pos_sin := self.__cache.get("yarn_rope_pos_sin")) is not None
+            and (pos_cos := self.__cache.get("yarn_rope_pos_cos")) is not None
+            and pos_sin.shape[-2] >= seq_len
+            and pos_cos.shape[-2] >= seq_len
+        ):
+            if pos_sin.device != device:
+                pos_sin = pos_sin.to(device)
+                self.__cache["yarn_rope_pos_sin"] = pos_sin
+            if pos_cos.device != device:
+                pos_cos = pos_cos.to(device)
+                self.__cache["yarn_rope_pos_cos"] = pos_cos
+            return pos_sin[:, :, :seq_len, :], pos_cos[:, :, :seq_len, :]
+
+        with torch.autocast(device.type, enabled=False):
+            seq = torch.arange(seq_len, device=device, dtype=torch.float)
+            freqs = einsum("i , j -> i j", seq, self.inv_freq)
+            positions = torch.cat((freqs, freqs), dim=-1)
+            pos_sin = (positions.sin() * self.mscale)[None, None, :, :]
+            pos_cos = (positions.cos() * self.mscale)[None, None, :, :]
+        self.__cache["yarn_rope_pos_sin"] = pos_sin
+        self.__cache["yarn_rope_pos_cos"] = pos_cos
+        return pos_sin, pos_cos
+
+    def rotate_half(self, x: torch.Tensor) -> torch.Tensor:
+        B, nh, T, hs = x.size()
+        x = x.view(B, nh, T, 2, hs // 2)
+        x1, x2 = x.unbind(dim=-2)
+        return torch.cat((-x2, x1), dim=-1)
+
+    def apply_rotary_pos_emb(self, pos_sin: torch.Tensor, pos_cos: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        return ((t * pos_cos) + (self.rotate_half(t) * pos_sin)).to(t.dtype)
+
+    def forward(
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            seq_len_override: Optional[int] = None
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.config.rope_full_precision:
+            q_, k_ = q.float(), k.float()
+        else:
+            q_, k_ = q, k
+        if self.inv_freq.device != q_.device:
+            self.inv_freq = self.inv_freq.to(q_.device)
+
+        full_len = k.shape[-2]
+        query_len = q.shape[-2]
+
+        with torch.autocast(q.device.type, enabled=False):
+            pos_sin_full, pos_cos_full = self.get_rotary_embedding(full_len, k_.device)
+            pos_sin_full = pos_sin_full.type_as(k_)
+            pos_cos_full = pos_cos_full.type_as(k_)
+
+            if seq_len_override is not None:
+                start = seq_len_override - query_len
+                end = seq_len_override
+            else:
+                start = full_len - query_len
+                end = full_len
+
+            sin_q = pos_sin_full[:, :, start:end, :]
+            cos_q = pos_cos_full[:, :, start:end, :]
+
+            q_out = self.apply_rotary_pos_emb(sin_q, cos_q, q_)
+            k_out = self.apply_rotary_pos_emb(pos_sin_full, pos_cos_full, k_)
+
+        return q_out.type_as(q), k_out.type_as(k)
+
+    def yarn(self, device):
+        pos_freqs = self.base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim)
+        inv_freq_extrapolation = 1.0 / pos_freqs
+        inv_freq_interpolation = 1.0 / (self.scale * pos_freqs)
+
+        low, high = self.find_correction_range(self.beta_fast, self.beta_slow, self.dim, self.base, self.original_max_position_embeddings)
+        inv_freq_mask = (1 - self.linear_ramp_mask(low, high, self.dim // 2).float().to(device)) * self.extrapolation_factor
+        inv_freq = inv_freq_interpolation * (1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
+
+        self.inv_freq = inv_freq
+        self.mscale = float(self.get_mscale(self.scale) * self.attn_factor)
+
+    def find_correction_dim(self, num_rotations, dim, base=10000.0, max_position_embeddings=4000):
+        return (dim * math.log(max_position_embeddings/(num_rotations * 2 * math.pi)))/(2 * math.log(base))
+
+    def find_correction_range(self, low_rot, high_rot, dim, base=10000.0, max_position_embeddings=4000):
+        low = math.floor(self.find_correction_dim(
+            low_rot, dim, base, max_position_embeddings))
+        high = math.ceil(self.find_correction_dim(
+            high_rot, dim, base, max_position_embeddings))
+        return max(low, 0), min(high, dim-1)
+
+    def linear_ramp_mask(self, min_val, max_val, dim):
+        if min_val == max_val:
+            max_val += 0.001
+
+        linear_func = (torch.arange(dim, dtype=torch.float32) - min_val) / (max_val - min_val)
+        ramp_func = torch.clamp(linear_func, 0, 1)
+        return ramp_func
+
+    def get_mscale(self, scale=1.0):
+        if scale <= 1:
+            return 1.0
+        return 0.1 * math.log(scale) + 1.0
 
 
 class Activation(nn.Module):
@@ -516,7 +674,6 @@ def alibi_attention_bias(seq_len: int, config: ModelConfig, device: torch.device
     # shape: (1, n_heads, seq_len, seq_len)
     return alibi_bias * (1.0 / (2 ** m.view(1, config.n_heads, 1, 1)))  # type: ignore
 
-
 class LLaDABlock(nn.Module):
     """
     A base class for transformer block implementations.
@@ -566,9 +723,14 @@ class LLaDABlock(nn.Module):
         )
         self.ff_out._is_residual = True  # type: ignore
 
+        # MODIFIED: Add conditional logic for RoPE or YaRN
         # Rotary embeddings.
+        self.rotary_emb = None
         if self.config.rope:
             self.rotary_emb = RotaryEmbedding(config, self.__cache)
+        elif self.config.yarn:
+            # Assume yarn config parameters are present in ModelConfig if config.yarn is True
+            self.rotary_emb = YarnRotaryEmbedding(config, self.__cache)
 
         self.flash_attn_func = None
         if config.flash_attention:
@@ -649,23 +811,26 @@ class LLaDABlock(nn.Module):
                 v = v.repeat_interleave(num_q_heads // num_kv_heads, dim=1, output_size=num_q_heads)
 
             # Modify: MDM set causal to False, and with no attn_mask.
-            return F.scaled_dot_product_attention(
+            return scaled_dot_product_attention(
                 q,
                 k,
                 v,
-                attn_mask=None,
+                attn_mask=attn_mask,
                 dropout_p=dropout_p,
                 is_causal=False,
             )
 
+    # MODIFIED: attention method to handle both RoPE and YaRN with robust KV caching
     def attention(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
         attention_bias: Optional[torch.Tensor] = None,
         layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
+        replace_position: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, T, C = q.size()  # batch size, sequence length, d_model
         dtype = k.dtype
@@ -676,37 +841,45 @@ class LLaDABlock(nn.Module):
             k = self.k_norm(k).to(dtype=dtype)
 
         # Move head forward to be next to the batch dim.
-        # shape: (B, nh, T, hs)
         q = q.view(B, T, self.config.n_heads, C // self.config.n_heads).transpose(1, 2)
-        # shape: (B, n_kv_h, T, hs)
         k = k.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads).transpose(1, 2)
-        # shape: (B, n_kv_h, T, hs)
         v = v.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads).transpose(1, 2)
 
+        seq_len_override = None
         if layer_past is not None:
             past_key, past_value = layer_past
-            k = torch.cat((past_key, k), dim=-2)
-            v = torch.cat((past_value, v), dim=-2)
+            if replace_position is None:
+                # Standard causal generation with cache
+                k = torch.cat((past_key, k), dim=-2)
+                v = torch.cat((past_value, v), dim=-2)
+            else:
+                # Use the robust logic from Model 1 for replacing positions in the cache
+                replace_indices = replace_position.nonzero(as_tuple=True)[1]
+                past_key[:, :, replace_indices] = k
+                k = past_key
+                past_value[:, :, replace_indices] = v
+                v = past_value
+                # This value is the effective end of the sequence for rotary embeddings
+                seq_len_override = replace_indices.max().item() + 1
 
         present = (k, v) if use_cache else None
-        query_len, key_len = q.shape[-2], k.shape[-2]  # could be different if layer_past not None
+        query_len, key_len = q.shape[-2], k.shape[-2]
 
-        if self.config.rope:
-            # Apply rotary embeddings.
-            q, k = self.rotary_emb(q, k)
+        # Apply rotary embeddings.
+        if self.rotary_emb is not None:
+            if self.config.rope:
+                block_end_idx_tensor = torch.tensor(seq_len_override, device=q.device) if seq_len_override is not None else None
+                q, k = self.rotary_emb(q, k, block_end_index=block_end_idx_tensor)
+            elif self.config.yarn:
+                q, k = self.rotary_emb(q, k, seq_len_override=seq_len_override)
 
         if attention_bias is not None:
             # Resize and cast attention bias.
-            # The current dtype of the attention bias might not match the dtype that the SDP attn function will
-            # run in if AMP is enabled, and this can be a problem if some tokens are masked out due to padding
-            # as down-casting the attention bias to the autocast precision will result in -infs, which will
-            # cause the SDP attn function to produce NaNs.
             attention_bias = self._cast_attn_bias(
                 attention_bias[:, :, key_len - query_len : key_len, :key_len], dtype
             )
 
         # Get the attention scores.
-        # shape: (B, nh, T, hs)
         att = self._scaled_dot_product_attention(
             q,
             k,
@@ -715,7 +888,6 @@ class LLaDABlock(nn.Module):
             dropout_p=0.0 if not self.training else self.config.attention_dropout,
             is_causal=False,
         )
-
         # Re-assemble all head outputs side-by-side.
         att = att.transpose(1, 2).contiguous().view(B, T, C)
 
@@ -888,6 +1060,117 @@ class LLaDALlamaBlock(LLaDABlock):
         attention_bias: Optional[torch.Tensor] = None,
         layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
+        replace_position: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        # Get query, key, value projections.
+        # shape:
+        #  - for regular attn q, k, v: (batch_size, seq_len, d_model)
+        #  - for multi-query attn q: (batch_size, seq_len, d_model)
+        #                      k, v: (batch_size, seq_len, d_model // n_heads)
+        #  - for group query attn q: (batch_size, seq_len, d_model)
+        #                      k, v: (batch_size, seq_len, d_model // n_kv_heads)
+        x_normed = self.attn_norm(x) #x:torch.Size([2, 168, 4096])
+        q = self.q_proj(x_normed) #q:torch.Size([2, 168, 4096])
+        k = self.k_proj(x_normed) #k:torch.Size([2, 168, 4096])
+        v = self.v_proj(x_normed) #v:torch.Size([2, 168, 4096])
+        # attention_bias: None
+        # layer_past: None
+        # use_cache: False
+        # Get attention scores.
+        if self._activation_checkpoint_fn is not None:
+            att, cache = self._activation_checkpoint_fn(  # type: ignore
+                self.attention, q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position
+            )
+        else:
+            att, cache = self.attention(q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position)
+
+        # Add attention scores.
+        # shape: (B, T, C)
+        x = x + self.dropout(att)
+
+        # Add feed-forward projection.
+        # shape: (batch_size, seq_len, d_model)
+        og_x = x
+        if self._activation_checkpoint_fn is not None:
+            x = self._activation_checkpoint_fn(self.ff_norm, x)  # type: ignore
+        else:
+            x = self.ff_norm(x)
+        x, x_up = self.ff_proj(x), self.up_proj(x) # new add
+        if self._activation_checkpoint_fn is not None:
+            x = self._activation_checkpoint_fn(self.act, x)  # type: ignore
+        else:
+            x = self.act(x)
+        x = x * x_up # new add
+        x = self.ff_out(x)
+        x = self.dropout(x)
+        x = og_x + x
+
+        return x, cache
+
+
+class LLaDABlockDiffBlock(LLaDABlock):
+    """
+    This is a transformer block where the output is computed as ``MLP(LN(x + Attention(LN(x))))``
+    (plus another skip connection). This block is similar to `LLaDASequentialBlock`
+    but some operations have slightly different implementations to imitate the
+    behavior of Llama.
+    """
+
+    def __init__(self, layer_id: int, config: ModelConfig, cache: BufferCache):
+        super().__init__(layer_id, config, cache)
+        # Layer norms.
+        self.attn_norm = LayerNorm.build(config)
+        self.ff_norm = LayerNorm.build(config)
+        self.__cache = cache
+
+        # Attention input projection. Projects x -> (q, k, v)
+        head_dim = config.d_model // config.n_heads
+        q_proj_out_dim = config.d_model
+        k_proj_out_dim = config.effective_n_kv_heads * head_dim
+        v_proj_out_dim = config.effective_n_kv_heads * head_dim
+        self.q_proj = nn.Linear(
+            config.d_model, q_proj_out_dim, bias=config.include_bias | config.include_qkv_bias, device=config.init_device
+        )
+        self.k_proj = nn.Linear(
+            config.d_model, k_proj_out_dim, bias=config.include_bias | config.include_qkv_bias, device=config.init_device
+        )
+        self.v_proj = nn.Linear(
+            config.d_model, v_proj_out_dim, bias=config.include_bias | config.include_qkv_bias, device=config.init_device
+        )
+
+        # Feed-forward input projection.
+        self.ff_proj = nn.Linear(
+            config.d_model, self.hidden_size, bias=config.include_bias, device=config.init_device
+        )
+        # new add
+        self.up_proj = nn.Linear(
+            config.d_model, self.hidden_size, bias=config.include_bias, device=config.init_device
+        )
+
+    def reset_parameters(self):
+        super().reset_parameters()
+        self.attn_norm.reset_parameters()
+        self.ff_norm.reset_parameters()
+        # NOTE: the standard deviation for these weights does not depend on the layer.
+        init_weights(self.config, self.q_proj, d=self.config.d_model, layer_id=None)
+        init_weights(self.config, self.k_proj, d=self.config.d_model, layer_id=None)
+        init_weights(self.config, self.v_proj, d=self.config.d_model, layer_id=None)
+        init_weights(self.config, self.ff_proj, d=self.config.d_model, layer_id=None)
+        init_weights(self.config, self.up_proj, d=self.config.d_model, layer_id=None)  # new add
+
+    def cross_attn_flex(self, qkv, mask=None):
+        qkv = rearrange(qkv, 'b s three h d -> b h three s d', h=self.n_heads)
+        x = fused_flex_attention(
+        qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2], mask=mask)
+        x = rearrange(x, 'b h s d -> b s (h d)')
+        return x
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_bias: Optional[torch.Tensor] = None,
+        layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Get query, key, value projections.
         # shape:
@@ -1030,8 +1313,8 @@ class LLaDAModel(nn.Module):
         if self.config.alibi and self.config.flash_attention:
             raise Exception("ALiBi is currently not supported with FlashAttention")
 
-        if self.config.alibi and self.config.rope:
-            raise Exception("ALiBi and RoPE are mutually exclusive")
+        if self.config.alibi and self.config.rope and self.config.yarn:
+            raise Exception("ALiBi, RoPE and Yarn are mutually exclusive")
 
         if self.config.embedding_size is not None and self.config.embedding_size != self.config.vocab_size:
             if self.config.embedding_size < self.config.vocab_size:
@@ -1075,7 +1358,7 @@ class LLaDAModel(nn.Module):
         else:
             self.transformer.update({"blocks": nn.ModuleList(blocks)})
 
-        if not (self.config.alibi or self.config.rope):
+        if not (self.config.alibi or self.config.rope or self.config.yarn):
             self.transformer.update(
                 {"wpe": nn.Embedding(config.max_sequence_length, config.d_model, device=config.init_device)}
             )
@@ -1094,11 +1377,11 @@ class LLaDAModel(nn.Module):
         if init_params and self.config.init_device != "meta":
             self.reset_parameters()
         self.__num_fwd_flops: Optional[int] = None
-
         # Warm up cache.
         if self.config.alibi:
             get_causal_attention_bias(self.__cache, config.max_sequence_length, _non_meta_init_device(config))
             self.get_alibi_attention_bias(config.max_sequence_length, _non_meta_init_device(config))
+
 
     def set_activation_checkpointing(self, strategy: Optional[ActivationCheckpointingStrategy]):
         self.activation_checkpointing_strategy = strategy
@@ -1167,6 +1450,7 @@ class LLaDAModel(nn.Module):
         use_cache: bool = False,
         last_logits_only: bool = False,
         output_hidden_states: Optional[bool] = None,
+        replace_position: Optional[torch.Tensor] = None,
     ) -> LLaDAOutput:
         """
         :param input_ids: A tensor of shape `(batch_size, seq_len)`.
@@ -1176,16 +1460,20 @@ class LLaDAModel(nn.Module):
             which input IDs are masked. A `1` value in the mask means that
             the corresponding input ID should *not* be ignored. A `0` means
             that the corresponding input ID is masked.
+
             This has the same meaning as the `attention_mask` in HuggingFace's `transformers`
             library.
         :param attention_bias: A tensor of shape `(batch_size, 1, seq_len, seq_len)`,
             `(1, 1, seq_len, seq_len)`, or `(seq_len, seq_len)`. This is used
             to introduce causal or other biases.
+
             If the tensor is a bool or byte tensor, a `True` or `1` at `attention_bias[:, :, i, j]`
             indicates that the i-th element in the sequence is allowed to attend to the j-th
             element in the sequence.
+
             If the tensor is a float tensor, it will just be added to the attention
             scores before the softmax.
+
             The default is causal, which corresponds to a lower-diagonal byte matrix of ones.
         :param past_key_values: Pre-computed keys and values for each attention block.
             Can be used to speed up sequential decoding. The `input_ids` which have
@@ -1196,8 +1484,8 @@ class LLaDAModel(nn.Module):
         """
         # Add Basic MDM Model config check
         assert not self.config.alibi, "Alibi length extrapolation is not supported for MDM."
-        assert self.config.rope, "Rope must be used in Llama-Encoder for MDM."
-        assert (past_key_values is None and not use_cache), "The kvcache is not suppotred for MDM."
+        assert (self.config.rope or self.config.yarn), "Either RoPE or Yarn must be enabled."
+        # assert (past_key_values is None and not use_cache), "The kvcache is not suppotred for MDM."
 
         output_hidden_states = output_hidden_states if output_hidden_states is not None else False
 
@@ -1217,7 +1505,7 @@ class LLaDAModel(nn.Module):
         if self.config.input_emb_norm:
             x = x * (self.config.d_model**0.5)
 
-        if not (self.config.alibi or self.config.rope):
+        if not (self.config.alibi or self.config.rope or self.config.yarn):
             # Get positional embeddings.
             # shape: (1, seq_len)
             pos = torch.arange(past_length, past_length + seq_len, dtype=torch.long, device=x.device).unsqueeze(0)
@@ -1303,11 +1591,11 @@ class LLaDAModel(nn.Module):
                 ):
                     # shape: (batch_size, seq_len, d_model)
                     x, cache = self._activation_checkpoint_fn(
-                        block, x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache
+                        block, x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position
                     )
                 else:
                     # shape: (batch_size, seq_len, d_model)
-                    x, cache = block(x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache)
+                    x, cache = block(x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position)
                 if attn_key_values is not None:
                     assert cache is not None
                     attn_key_values.append(cache)
@@ -1386,7 +1674,10 @@ class LLaDAModelLM(PreTrainedModel):
             self.model = LLaDAModel(model_config, init_params=init_params)
         else:
             self.model = model
-
+    def set_activation_checkpointing(self, strategy: Optional[ActivationCheckpointingStrategy]):
+        """Passes the activation checkpointing command to the core model."""
+        self.model.set_activation_checkpointing(strategy)
+        
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1399,7 +1690,7 @@ class LLaDAModelLM(PreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        cache_position: Optional[Cache] = None,  # This is a hack mitigation of an issue in transformers `4.39.x`
+        replace_position: Optional[torch.Tensor] = None,  # This is a hack mitigation of an issue in transformers `4.39.x`
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if use_cache is None:
             use_cache = self.config.use_cache
@@ -1408,7 +1699,7 @@ class LLaDAModelLM(PreTrainedModel):
             raise ValueError("output_attentions is not yet supported in LLaDA")
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+        # import pdb; pdb.set_trace()
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model.forward(
             input_ids=input_ids,
@@ -1418,8 +1709,9 @@ class LLaDAModelLM(PreTrainedModel):
             past_key_values=past_key_values,
             use_cache=use_cache,
             output_hidden_states=output_hidden_states,
+            replace_position=replace_position,
         )
-
+        # import pdb; pdb.set_trace()
         logits = outputs.logits
         hidden_states = outputs.hidden_states
 
@@ -1452,15 +1744,6 @@ class LLaDAModelLM(PreTrainedModel):
         model_inputs["use_cache"] = kwargs.pop("use_cache", self.config.use_cache)
         return model_inputs
 
-    # TODO: these are required to make the implementation complete.
-    # def resize_position_embeddings(self, new_num_position_embeddings: int):
-    #     pass
-    #
-    # def get_position_embeddings(self) -> Union[nn.Embedding, Tuple[nn.Embedding]]:
-    #     pass
-    #
-    # def _reorder_cache(self, past_key_values, beam_idx):
-    #     pass
 
     def get_input_embeddings(self) -> torch.nn.Module:
         return self.model.transformer.wte
