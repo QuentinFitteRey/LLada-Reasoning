@@ -11,8 +11,6 @@
 
 JOBID=$SLURM_JOB_ID
 
-echo "Evaluation: Job $JOBID has started!" | mail -s "SLURM Job Started!" jmoutahir3@gatech.edu
-
 module load anaconda3
 
 conda activate ~/scratch/envs/llada
@@ -32,5 +30,3 @@ srun accelerate launch \
     --batch_size 1 \
     --model_args 'model_path=/home/hice1/jmoutahir3/scratch/LLada-Reasoning/llada_local_1.5,load_lora=False,cfg=0.0,is_check_greedy=False,mc_num=128,gen_length=256,steps=256,block_length=16,temperature=0.0'
     # --model_args 'model_path=/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/merged_pretrained_model/merged_model_good_base,adapter_path=/home/hice1/jmoutahir3/scratch/LLaDA_checkpoints/sft/exp_quentin_1807/new_weights/step-2100/sft_adapter,load_lora=True,cfg=0.0,is_check_greedy=False,mc_num=128,gen_length=1024,steps=1024,block_length=16,temperature=0.0'
-
-echo "Evaluation: Job $JOBID has finished!" | mail -s "SLURM Job Finished!" jmoutahir3@gatech.edu
