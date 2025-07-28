@@ -14,10 +14,8 @@ def merge_lora_weights(model, lora_weights):
     Returns:
         LLaDAModelLM: The model with merged LoRA weights.
     """
-    # Load the LoRA weights
     lora_model = PeftModel.from_pretrained(model, lora_weights)
 
-    # Merge the LoRA weights into the base model
     merged_model = lora_model.merge_and_unload()
     
     return merged_model
@@ -32,7 +30,7 @@ def save_merged_model(model, tokenizer, output_dir):
         output_dir (str): Directory to save the merged model and tokenizer.
     """
     model.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir) # <-- Add this crucial line
+    tokenizer.save_pretrained(output_dir) 
     print(f"Merged model and tokenizer saved to {output_dir}")
 
 
@@ -45,21 +43,14 @@ def main():
 
     args = parser.parse_args()
     
-    # --- Step 1: Load the original base model and tokenizer ---
     print(f"Loading original base model from: {args.model_name}")
     model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     
-    # --- Step 2: Replicate the EXACT setup from the training script ---
     print("Replicating training setup: adding special tokens and resizing embeddings...")
     special_tokens_to_add = {
         "additional_special_tokens": ["<|mdm_mask|>", "<|start_header_id|>", "<|end_header_id|>","<|eot_id|>","<|begin_of_thought|>","<|end_of_thought|>" "<|begin_of_solution|>", "<|end_of_solution|>"]
     }
-    # Note: There was a missing comma in your training script between </end_of_thought> and <|begin_of_solution|>.
-    # Python treats this as string concatenation, so we do the same here to match perfectly.
-    # Corrected special tokens list if needed:
-    # "additional_special_tokens": ["<|mdm_mask|>", "<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>", "<|begin_of_thought|>","<|end_of_thought|>", "<|begin_of_solution|>", "<|end_of_solution|>"]
-    
     if tokenizer.pad_token is None:
         special_tokens_to_add["pad_token"] = "<|pad|>"
         
@@ -69,11 +60,8 @@ def main():
     print(f"Model and tokenizer resized. New vocabulary size: {len(tokenizer)}")
     model.to("cuda")
 
-    # --- Step 3: Now merge the LoRA weights onto the correctly prepared model ---
-    # The architectures now match, so this will succeed.
     merged_model = merge_lora_weights(model, args.lora_weights)
     
-    # --- Step 4: Save the final, merged model ---
     save_merged_model(merged_model, tokenizer, args.output_dir)
 
 if __name__ == "__main__":

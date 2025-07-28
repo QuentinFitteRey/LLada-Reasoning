@@ -8,14 +8,11 @@ def add_gumbel_noise(logits: torch.Tensor, temperature: float = 1.0) -> torch.Te
     if temperature == 0:
         return logits
     noise = torch.rand_like(logits)
-    # classic Gumbel noise
     gumbel_noise = -torch.log(-torch.log(noise + 1e-9) + 1e-9)
-    # apply temperature
     return (logits / temperature) + gumbel_noise
 
 
 def get_num_transfer_tokens(mask_index: torch.Tensor, steps: int) -> torch.Tensor:
-    # distribute mask counts evenly over steps
     mask_count = mask_index.sum(dim=1, keepdim=True)
     base = mask_count // steps
     rem = mask_count % steps
@@ -24,12 +21,11 @@ def get_num_transfer_tokens(mask_index: torch.Tensor, steps: int) -> torch.Tenso
         counts[i, :rem[i]] += 1
     return counts
 
-
 @torch.no_grad()
 def generate_with_dual_cache(
     model,
     prompt: torch.LongTensor,
-    attention_mask: Optional[torch.Tensor] = None, # shape (B, prompt_len)
+    attention_mask: Optional[torch.Tensor] = None,
     steps: int = 128,
     gen_length: int = 128,
     block_length: int = 128,
@@ -48,16 +44,15 @@ def generate_with_dual_cache(
 
     if attention_mask is not None:
         full_attention_mask = torch.ones(
-            (batch_size, total_len), 
-            dtype=attention_mask.dtype, 
+            (batch_size, total_len),
+            dtype=attention_mask.dtype,
             device=attention_mask.device
         )
         full_attention_mask[:, :prompt_len] = attention_mask
     else:
-        # If no mask is provided, assume all tokens are attended to.
         full_attention_mask = torch.ones(
-            (batch_size, total_len), 
-            dtype=torch.long, 
+            (batch_size, total_len),
+            dtype=torch.long,
             device=prompt.device
         )
 
@@ -79,7 +74,6 @@ def generate_with_dual_cache(
         start = prompt_len + block_idx * block_length
         end = start + block_length
 
-        # ---- PRIME CACHE FOR THIS BLOCK ---- #
         output = model(
             input_ids     = x,
             attention_mask= full_attention_mask,
@@ -89,11 +83,9 @@ def generate_with_dual_cache(
         logits = output.logits
         nfe += 1
 
-        # compute how many tokens to transfer per sub-step
         mask_block = (x[:, start:end] == mask_id)
         num_trans = get_num_transfer_tokens(mask_block, sub_steps)
 
-        # ---- INITIAL FILL FOR THE BLOCK ---- #
         full_mask = (x == mask_id)
         full_mask[:, end:] = False
         x0, transfer_idx = get_transfer_index_vectorized(
@@ -111,7 +103,6 @@ def generate_with_dual_cache(
         )
         x[transfer_idx] = x0[transfer_idx]
 
-        # ---- ITERATIVE REFINEMENT ---- #
         replace_mask = torch.zeros_like(x, dtype=torch.bool)
         replace_mask[:, start:end] = True
         for step in range(1, sub_steps):
@@ -120,10 +111,9 @@ def generate_with_dual_cache(
                 break
             nfe += 1
 
-            # forward only the block slice with cache replacement
             out = model(
                 input_ids       = x[:, start:end],
-                attention_mask  = full_attention_mask,#[:, start:end] if attention_mask is not None else None,
+                attention_mask  = full_attention_mask,
                 past_key_values = past_key_values,
                 use_cache       = True,
                 replace_position= replace_mask,
@@ -146,7 +136,6 @@ def generate_with_dual_cache(
             )
             x[:, start:end][transfer_blk] = x0_blk[transfer_blk]
 
-        # early stop if stop_token encountered in this block
         if stop_token_id is not None and (x[:, start:end] == stop_token_id).any():
             break
 
@@ -165,22 +154,18 @@ def get_transfer_index(
     prompt_len: int = 0,
     mask_id: Optional[int] = None,
 ):
-    # apply repetition penalty
     if repetition_penalty > 1.0 and penalty_context is not None:
-        # penalize logits of repeated tokens
         for i in range(logits.size(0)):
-            gen_slice = penalty_context[i, prompt_len:]  # only generated part
+            gen_slice = penalty_context[i, prompt_len:]
             if mask_id is not None:
                 gen_slice = gen_slice[gen_slice != mask_id]
             if gen_slice.numel() > 0:
                 unique_toks = gen_slice.unique()
                 logits[i, :, unique_toks] /= repetition_penalty
 
-    # sample via Gumbel max
     logits_noise = add_gumbel_noise(logits, temperature)
     x0 = torch.argmax(logits_noise, dim=-1)
 
-    # compute confidence for remasking
     if remasking == 'low_confidence':
         probs = F.softmax(logits.to(torch.float64), dim=-1)
         conf = torch.squeeze(probs.gather(-1, x0.unsqueeze(-1)), -1)
@@ -189,11 +174,9 @@ def get_transfer_index(
     else:
         raise NotImplementedError(remasking)
 
-    # mask out non-mask positions
     x0 = torch.where(mask_index, x0, x)
     confidence = torch.where(mask_index, conf, -np.inf)
 
-    # select top-k positions to update
     transfer = torch.zeros_like(x0, dtype=torch.bool)
     if threshold is not None:
         num_transfer = mask_index.sum(dim=1, keepdim=True)
@@ -208,11 +191,11 @@ def get_transfer_index(
     return x0, transfer
 
 def get_transfer_index_vectorized(
-    logits: torch.Tensor,               # (B, S, V)
+    logits: torch.Tensor,
     temperature: float,
     remasking: str,
-    mask_index: torch.Tensor,           # (B, S)
-    x: torch.Tensor,                    # (B, total_len)
+    mask_index: torch.Tensor,
+    x: torch.Tensor,
     num_transfer: Optional[torch.Tensor],
     threshold: Optional[float] = None,
     repetition_penalty: float = 1.0,
@@ -223,62 +206,48 @@ def get_transfer_index_vectorized(
     B, S, V = logits.shape
     device = logits.device
 
-    # ---- 1) Vectorized repetition penalty ----
     if repetition_penalty > 1.0 and penalty_context is not None:
-        # get generated tokens (B, gen_len)
         gen = penalty_context[:, prompt_len:]
         valid = gen != mask_id
-        # build a (B, V) mask of “seen” tokens
         counts = torch.zeros((B, V), device=device, dtype=torch.long)
         counts = counts.scatter_add(
             1,
             gen.masked_fill(~valid, 0),
             valid.to(torch.long)
         )
-        seen = counts>0           # (B, V) bool
-        # apply penalty only on those token‐channels
+        seen = counts>0
         logits = torch.where(
             seen[:, None, :],
             logits / repetition_penalty,
             logits
         )
 
-    # ---- 2) Gumbel‐max sampling ----
-    noise = add_gumbel_noise(logits, temperature)  # (B,S,V)
-    x0    = noise.argmax(dim=-1)                   # (B,S)
+    noise = add_gumbel_noise(logits, temperature)
+    x0    = noise.argmax(dim=-1)
 
-    # ---- 3) Confidence scores ----
     if remasking == 'low_confidence':
-        probs = F.softmax(logits.to(torch.float64), dim=-1)            # (B,S,V)
-        conf  = probs.gather(-1, x0.unsqueeze(-1)).squeeze(-1)         # (B,S)
+        probs = F.softmax(logits.to(torch.float64), dim=-1)
+        conf  = probs.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
     elif remasking == 'random':
         conf = torch.rand((B,S), device=device, dtype=torch.float64)
     else:
         raise NotImplementedError(remasking)
 
-    # mask out unchanged positions
     x0 = torch.where(mask_index, x0, x)
     conf = torch.where(mask_index, conf, -float('inf'))
 
-    # ---- 4) Vectorized top‐k / threshold selection ----
-    # sort confidences desc
-    conf_vals, conf_idxs = conf.sort(dim=1, descending=True)  # (B,S)
-    # how many to take?
+    conf_vals, conf_idxs = conf.sort(dim=1, descending=True)
     if threshold is None:
-        k = num_transfer if num_transfer.dim() == 1 else num_transfer.squeeze(1)  # (B,)
+        k = num_transfer if num_transfer.dim() == 1 else num_transfer.squeeze(1)
         above_thr = torch.ones_like(conf_vals, dtype=torch.bool, device=device)
     else:
-        # if threshold is set, default k = full mask count, then drop below‐thr
-        k = mask_index.sum(dim=1)  # (B,)
+        k = mask_index.sum(dim=1)
         above_thr = conf_vals >= threshold
-        # new line to always keep the top‐1
         above_thr[:, 0] = True
 
-    # build a mask on the sorted positions: take top‐k in each row
-    ar = torch.arange(S, device=device).unsqueeze(0).expand(B, S)  # (B,S)
-    sorted_mask = (ar < k.unsqueeze(1)) & above_thr               # (B,S)
+    ar = torch.arange(S, device=device).unsqueeze(0).expand(B, S)
+    sorted_mask = (ar < k.unsqueeze(1)) & above_thr
 
-    # scatter back into original order
     transfer = torch.zeros((B, S), dtype=torch.bool, device=device)
     transfer = transfer.scatter(1, conf_idxs, sorted_mask)
 
@@ -296,7 +265,6 @@ def main():
 
     thinking_mode = """Your role as an assistant involves thoroughly exploring questions through a systematic long thinking process before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop well-considered thinking process. Please structure your response into two main sections: Thought and Solution. In the Thought section, detail your reasoning process using the specified format: <|begin_of_thought|> {thought with steps separated with '\n\n'} <|end_of_thought|> Each step should include detailed considerations such as analisying questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, explorations, and reflections from the Thought section, systematically present the final solution that you deem correct. The solution should remain a logical, accurate, concise expression style and detail necessary step needed to reach the conclusion, formatted as follows: <|begin_of_solution|> {final formatted, precise, and clear solution} <|end_of_solution|> Now, try to solve the following question through the above guidelines:"""
 
-    # Define the prompts
     prompts = [
         "Describe the process of fine-tuning a CLIP model with LoRA on a small dataset.",
         "Explain how a Kalman filter works in the context of object tracking.",
@@ -311,7 +279,6 @@ def main():
     
     prompts = new_prompts
 
-    # Apply chat template to each, then batch‑tokenize
     wrapped = []
     for p in prompts:
         msg = [{"role":"user","content": p}]
@@ -319,7 +286,6 @@ def main():
             tokenizer.apply_chat_template(msg, add_generation_prompt=True, tokenize=False)
         )
     
-    # Tokenize the wrapped prompts and pad on the left
     tokenizer.padding_side = "left"
     batch = tokenizer(
         wrapped,
@@ -330,13 +296,11 @@ def main():
     input_ids = batch["input_ids"].to(device)
     attention_mask = batch["attention_mask"].to(device)
 
-    # Print the input_ids for debugging
     print("Input IDs:")
     for i, ids in enumerate(input_ids):
         print(f"Prompt {i+1}: {ids.tolist()}")
         print(f"Decoded: {tokenizer.decode(ids, skip_special_tokens=False)}")
 
-    # Measure generation time
     t0 = torch.cuda.Event(enable_timing=True)
     t1 = torch.cuda.Event(enable_timing=True)
     t0.record()
@@ -357,7 +321,6 @@ def main():
     elapsed = t0.elapsed_time(t1) / 1000.0
     print(f"Generation time: {elapsed:.2f}s, NFE: {nfe}")
 
-    # Decode and print each result
     gens = tokenizer.batch_decode(
         out[:, input_ids.shape[1]:],
         skip_special_tokens=False

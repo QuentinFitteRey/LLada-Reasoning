@@ -5,7 +5,7 @@ from openrlhf.utils.distributed_sampler import DistributedSampler
 import torch.nn.functional as F
 # --- Core Imports ---
 from rlhf.grpo_loss import GRPOLoss
-from fixed_generation_dual_cache import generate_with_dual_cache
+from generation import generate_with_dual_cache
 
 SAVE_EVERY = 2
 

@@ -1,6 +1,3 @@
-'''
-This file is inspired by the code from https://github.com/ML-GSAI/SMDM
-'''
 import accelerate
 import torch
 import re
@@ -63,23 +60,6 @@ class LLaDAEvalHarness(LM):
         use_thinking=True,
         **kwargs,
     ):
-        '''
-        Args:
-            model_path: LLaDA-8B-Base model path.
-            mask_id: The token id of [MASK] is 126336.
-            max_length: the max sequence length.
-            batch_size: mini batch size.
-            mc_num: Monte Carlo estimation iterations
-            is_check_greedy: For certain metrics like LAMBADA, the evaluation requires the model to verify whether the answer 
-                             is generated through greedy sampling conditioned on the prompt (note that this differs from conditional
-                             generation). We implement this verification through the suffix_greedy_prediction() function, which 
-                             returns a True/False judgment used for accuracy calculation. 
-                             When is_check_greedy is set to True, the lm-evaluation-harness library automatically invokes this function. 
-                             However, since none of the metrics in the LLaDA paper (https://arxiv.org/abs/2502.09992) require this functionality, 
-                             we recommend setting is_check_greedy to False. This configuration causes suffix_greedy_prediction() to return False 
-                             by default, significantly accelerating the evaluation process.
-            cfg_scale: Unsupervised classifier-free guidance scale.
-        '''
         super().__init__()
         self.model_path = model_path
         self.adapter_path = adapter_path
@@ -106,12 +86,9 @@ class LLaDAEvalHarness(LM):
             model_path=self.model_path,
             adapter_path=self.adapter_path,
             load_lora=self.load_lora,
-            # device=device,
             torch_dtype=torch.bfloat16,
         )
-        # model = model.to(device)
         self.model = model
-        # Pad on the left for generation
         tokenizer.padding_side = "left"
         self.tokenizer = tokenizer
         self.model.eval()
@@ -121,7 +98,6 @@ class LLaDAEvalHarness(LM):
         print("remasking:", remasking)
 
 
-        # self.device = torch.device(device)
         if self.accelerator is not None:
             self.model = self.accelerator.prepare(self.model)
             self.device = torch.device(f'{self.accelerator.device}')
@@ -144,7 +120,7 @@ class LLaDAEvalHarness(LM):
         self.steps = steps
         self.gen_length = gen_length
         self.block_length = block_length
-        self.remasking = remasking    
+        self.remasking = remasking 	
     @property
     def rank(self):
         return self._rank
@@ -267,7 +243,6 @@ class LLaDAEvalHarness(LM):
         ds = ds.with_format("torch")
         prompt_len = [len(x["prefix"]) + len(x["target"]) for x in ds]
 
-        # Truncate sequences longer than max_length
         if max(prompt_len) > 4096:
             print(f"[Warning] Some sequences are longer than 4096 tokens, truncating to 4096.")
             ds = ds.map(
@@ -328,13 +303,11 @@ class LLaDAEvalHarness(LM):
         out = []
         for elem in tqdm(ds, desc="Generating..."):
 
-            # Concatenate the thinking mode or not thinking mode with the question_text
             if self.use_thinking:
                 question_text = f"{thinking_mode}\n{elem['question_text']}"
             else:
                 question_text = f"{not_thinking_mode}\n{elem['question_text']}"
 
-            # wrap the question in a chat template
             raw = question_text
             chat_history = [{"role":"user","content": raw}]
             prompt_str = self.tokenizer.apply_chat_template(
@@ -343,11 +316,9 @@ class LLaDAEvalHarness(LM):
                 add_generation_prompt=True
             )
 
-            # tokenize
             prompt_ids = self.tokenizer(prompt_str)["input_ids"]
             prompt = torch.tensor([prompt_ids], device=self.device)
 
-            # generate with dual cache
             generated_ids, _ = generate_with_dual_cache(
                 self.model,
                 prompt,
@@ -360,28 +331,15 @@ class LLaDAEvalHarness(LM):
                 repetition_penalty=1.0,
             )
 
-            # strip off the prompt tokens and decode
             gen_part = generated_ids[0, len(prompt_ids) :]
             text = self.tokenizer.decode(gen_part, skip_special_tokens=False)
 
-            # stop‐token trimming
             stop_token = "<|eot_id|>"
             if stop_token in text:
                 text = text[: text.index(stop_token)]
 
-            # remove any stray special tokens
             final_ids = self.tokenizer(text)["input_ids"]
             clean = self.tokenizer.decode(final_ids, skip_special_tokens=True)
-
-            # print("----- PROMPT BEGIN -----", file=sys.stderr)
-            # print(prompt_str, file=sys.stderr)
-            # print("------ PROMPT END ------\n", file=sys.stderr)
-            # print("----- GENERATED BEGIN ----", file=sys.stderr)
-            # print(text, file=sys.stderr)
-            # print("------ GENERATED END -----\n", file=sys.stderr)
-            # print("----- ANSWER BEGIN ----", file=sys.stderr)
-            # print(clean, file=sys.stderr)
-            # print("------ ANSWER END -----", file=sys.stderr)
 
             out.append(clean)
 
@@ -393,7 +351,6 @@ class LLaDAEvalHarness(LM):
     def generate_until(self, requests: list[Instance]):
 
         thinking_mode = """You must think step by step and provide detailed thinking on the problem before giving the final answer.\nYou must put your thinking process between <think> and </think> tags and then output the final answer with a summary of your thinking process.\nIn your thinking process, this requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop a well-considered thinking process."""
-        # thinking_mode = """Your role as an assistant involves thoroughly exploring questions through a systematic long thinking process before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop well-considered thinking process. Please structure your response into two main sections: Thought and Solution. In the Thought section, detail your reasoning process using the specified format: <|begin_of_thought|> {thought with steps separated with '\n\n'} <|end_of_thought|> Each step should include detailed considerations such as analisying questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, explorations, and reflections from the Thought section, systematically present the final solution that you deem correct. The solution should remain a logical, accurate, concise expression style and detail necessary step needed to reach the conclusion, formatted as follows: <|begin_of_solution|> {final formatted, precise, and clear solution} <|end_of_solution|> Now, try to solve the following question through the above guidelines:"""
         not_thinking_mode = """"""
 
         if requests:
@@ -413,15 +370,12 @@ class LLaDAEvalHarness(LM):
         )
         ds = ds.with_format("torch")
 
-        # Batched generation
         all_prompts: list[list[int]] = []
-        raw_texts: list[str]     = []
+        raw_texts: list[str] 	 = []
 
-        # Make sure the padding is on the left
         self.tokenizer.padding_side = "left"
 
         for elem in tqdm(ds, desc="Preparing prompts..."):
-            # reconstruct the engineered prompt here
             if self.use_thinking:
                 q = f"{thinking_mode}\n{elem['question_text']}"
             else:
@@ -439,17 +393,15 @@ class LLaDAEvalHarness(LM):
         for i in tqdm(range(0, len(all_prompts), self.generate_batch_size), desc="Generating..."):
             batch_texts = raw_texts[i : i + self.generate_batch_size]
 
-            # this will give you input_ids padded to the longest in the batch
             enc = self.tokenizer(
                 batch_texts,
-                padding=True,               # pad to longest
-                return_tensors="pt",        # give PyTorch tensors
-                add_special_tokens=False    # we already called apply_chat_template
+                padding=True, 	 	 	 	
+                return_tensors="pt", 	 	 	
+                add_special_tokens=False 	
             )
-            input_ids    = enc["input_ids"].to(self.device)
+            input_ids 	 = enc["input_ids"].to(self.device)
             attention_mask = enc.get("attention_mask", None)
 
-            # one batched call
             generated, _ = generate_with_dual_cache(
                 self.model,
                 input_ids,
@@ -462,13 +414,11 @@ class LLaDAEvalHarness(LM):
                 repetition_penalty=self.repetition_penalty
             )
 
-            # extract each example’s generation
-            # we find out how many real (non‑pad) tokens there were
             if attention_mask is not None:
                 prompt_lens = attention_mask.sum(dim=1)
             else:
                 prompt_lens = torch.tensor([input_ids.shape[1]] * input_ids.shape[0],
-                                        device=input_ids.device)
+                                           device=input_ids.device)
 
             for j, plen in enumerate(prompt_lens):
                 start = plen.item()
@@ -477,13 +427,11 @@ class LLaDAEvalHarness(LM):
 
                 print(f"answer: \n {text}")
 
-                # trim at the stop token
                 if "<|eot_id|>" in text:
                     text = text[: text.index("<|eot_id|>")]
 
-                # re‑tokenize+decode to strip any stray special tokens
                 final_ids = self.tokenizer(text)["input_ids"]
-                clean     = self.tokenizer.decode(final_ids, skip_special_tokens=True)
+                clean 	  = self.tokenizer.decode(final_ids, skip_special_tokens=True)
 
                 out.append(clean)
 
@@ -496,27 +444,22 @@ if __name__ == "__main__":
     is_main_process = accelerator.is_main_process
 
     if is_main_process:
-        # Capture CLI args
         args_str = " ".join(sys.argv)
 
-        # Redirect stdout to capture printed output
         f = io.StringIO()
         with redirect_stdout(f):
             cli_evaluate()
         printed_output = f.getvalue()
         print(printed_output, flush=True)
 
-        # Construct log entry
         log_entry = {
             "timestamp": datetime.datetime.now().isoformat(),
             "args": args_str,
             "output": printed_output,
         }
 
-        # Append to a file
         os.makedirs("eval_logs", exist_ok=True)
         with open("eval_logs/eval_results_log.txt", "a") as log_file:
             log_file.write(json.dumps(log_entry) + "\n")
     else:
         cli_evaluate()
-    
