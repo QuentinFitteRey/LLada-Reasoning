@@ -1,6 +1,6 @@
 # LLada-Reasoning
 
-A comprehensive training framework for large language models with reasoning capabilities, featuring pretraining, supervised fine-tuning (SFT), and reinforcement learning from human feedback (RLHF).
+A comprehensive training framework for large language diffusion models with reasoning capabilities, featuring pretraining, supervised fine-tuning (SFT), and reinforcement learning from human feedback (RLHF).
 
 ## Quick Start
 
@@ -80,11 +80,6 @@ python eval_llada.py --model_path ./merged_model
 
 📖 **[QUICK_REFERENCE.md](QUICK_REFERENCE.md)** - Complete commands, parameters, and troubleshooting
 
-## Hardware Requirements
-
-- **GPUs**: CUDA-compatible GPUs (4-8 recommended)
-- **Memory**: 64GB+ system RAM
-- **Storage**: 500GB+ available space
 
 ## Monitoring
 
