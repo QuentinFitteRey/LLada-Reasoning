@@ -22,12 +22,6 @@ from rlhf.grpo_trainer import GRPOTrainer
 from datasets import load_dataset
 
 def init_base_model_and_tokenizer(args):
-    """
-    Initializes the base model and tokenizer from a given path,
-    adds the required special tokens, and resizes the model's embeddings
-    to match the new tokenizer size. This provides a consistent starting
-    point for both the policy and reference models.
-    """
     print(f"Loading tokenizer from: {args.pretrain}")
     tokenizer = AutoTokenizer.from_pretrained(args.pretrain)
 
@@ -59,16 +53,17 @@ def init_base_model_and_tokenizer(args):
 
 def blending_datasets(
     datasets: str,
-    probabilities=None,    # ignored
-    strategy=None,         # still available for logging
-    seed: int = 42,        # ignored
+    probabilities=None,
+    strategy=None,
+    seed: int = 42,
     max_count: float = 1e8
 ):
     """
     Simplified loader for a single HF dataset (with optional config after '@').
-    Signature kept the same so other code doesn’t break.
+    Signature kept the same so other code doesn't break.
+    Args:
+        datasets (string): “name@config” or just “name”
     """
-    # parse “name@config” or just “name”
     if "@" in datasets:
         name, config = datasets.split("@", 1)
         name, config = name.strip(), config.strip()
@@ -89,7 +84,6 @@ def blending_datasets(
     return data
 
 def train(args):
-    # --- Strategy Setup ---
     def get_strategy(args):
         return DeepspeedStrategy(
             seed=getattr(args, "seed", 42),
@@ -103,12 +97,8 @@ def train(args):
     strategy = get_strategy(args)
     strategy.setup_distributed()
 
-    # --- Initialize Base Model and Tokenizer ---
-    # This provides the correctly resized starting point for both models.
+    # --- Prepare Models ---
     base_model, tokenizer = init_base_model_and_tokenizer(args)
-
-    # --- REFERENCE MODEL CREATION ---
-    # The reference model is the base model with ONLY the SFT adapter loaded. It is completely frozen.
     strategy.print(f"Creating reference model by loading frozen SFT adapter from: {args.sft_adapter_path}")
     ref_model_peft = PeftModel.from_pretrained(
         base_model,
@@ -117,12 +107,9 @@ def train(args):
         adapter_name="sft_adapter"  # Naming for clarity
     )
     ref_model = Actor(ref_model_peft, tokenizer=tokenizer, use_flash_attention_2=args.flash_attn, bf16=args.bf16, ds_config=strategy.get_ds_eval_config(offload=args.ref_offload))
+    
 
-    # --- POLICY MODEL CREATION (STACKING ADAPTERS) ---
-    # We need a fresh base model instance to avoid object reference issues.
     policy_base_model, _ = init_base_model_and_tokenizer(args)
-
-    # 1. Load the SFT adapter onto the fresh base model and keep it frozen.
     strategy.print(f"Creating policy model by loading frozen SFT adapter from: {args.sft_adapter_path}")
     policy_model_peft = PeftModel.from_pretrained(
         policy_base_model,
@@ -130,60 +117,51 @@ def train(args):
         is_trainable=False,
         adapter_name="sft_adapter"
     )
-    # special_tokens_to_add_buggy = {
-    #     "additional_special_tokens": [
-    #         "<|mdm_mask|>", "<|start_header_id|>", "<|end_header_id|>","<|eot_id|>",
-    #         "<|begin_of_thought|>","<|end_of_thought|>", "<|begin_of_solution|>", "<|end_of_solution|>"
-    #     ]
-    # }
-    # if tokenizer.pad_token is None:
-    #     special_tokens_to_add_buggy["pad_token"] = "<|pad|>"
-    
-    # tokenizer.add_special_tokens(special_tokens_to_add_buggy)
-    # new_vocab_size = len(tokenizer)
-    # policy_model_peft.resize_token_embeddings(new_vocab_size)
-    # ref_model.model.resize_token_embeddings(new_vocab_size)
 
-    # 2. Define the configuration for the NEW adapter for GRPO training.
+    # Resize both model. Comment out for quick testing
+    special_tokens_to_add_buggy = {
+        "additional_special_tokens": [
+            "<|mdm_mask|>", "<|start_header_id|>", "<|end_header_id|>","<|eot_id|>",
+            "<|begin_of_thought|>","<|end_of_thought|>", "<|begin_of_solution|>", "<|end_of_solution|>"
+        ]
+    }
+    if tokenizer.pad_token is None:
+        special_tokens_to_add_buggy["pad_token"] = "<|pad|>"
+    
+    tokenizer.add_special_tokens(special_tokens_to_add_buggy)
+    new_vocab_size = len(tokenizer)
+    policy_model_peft.resize_token_embeddings(new_vocab_size)
+    ref_model.model.resize_token_embeddings(new_vocab_size)
+    strategy.print("Applying second round of special tokens (with missing comma) and resizing...")
+
+
+    # Setting up trainable Lora for GRPO, load ckpt if load_ckpt=True
     strategy.print("Defining and adding a new, trainable adapter for GRPO training...")
     grpo_lora_config = LoraConfig(
         r=args.lora_rank, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
         bias="none", task_type="CAUSAL_LM", target_modules=args.target_modules,
     )
-
-    # 3. Add the new adapter to the model and set it as the active one for training.
     policy_model_peft.add_adapter("grpo_adapter", grpo_lora_config)
     if args.load_ckpt:
         adapter_dir = os.path.join(args.load_ckpt, "grpo_adapter")
         policy_model_peft.load_adapter(
-        adapter_dir,     # path to the folder where you did `.save_pretrained()`
+        adapter_dir,
         adapter_name="grpo_adapter",
         is_trainable=True
     )
     policy_model_peft.set_adapter("grpo_adapter")
-
     strategy.print("Policy model created with stacked adapters. Trainable parameters:")
     policy_model_peft.print_trainable_parameters()
-
     model = Actor(policy_model_peft, tokenizer=tokenizer, use_flash_attention_2=args.flash_attn, bf16=args.bf16, ds_config=strategy.get_ds_train_config(is_actor=True))
 
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant})
-
-    # --- USER REQUEST: Add special tokens again with missing comma and resize ---
-    strategy.print("Applying second round of special tokens (with missing comma) and resizing...")
-
     
-    # strategy.print(f"Resizing both policy and reference models to new tokenizer size: {new_vocab_size}")
-    # The `resize_token_embeddings` method should be called on the underlying PeftModel
-    # strategy.print("Models resized successfully.")
-    # --- END OF USER REQUEST ---
 
     # --- Optimizer, Data, and Scheduler ---
     optim = strategy.create_optimizer(model, lr=args.learning_rate, betas=args.adam_betas, weight_decay=args.l2)
-    # DEBUG: how many trainable parameters did the optimizer actually get?
     total_params = sum(p.numel() for g in optim.param_groups for p in g["params"])
-    print(f"[DEBUG] optimizer has {total_params:,} parameters to update")
+    # print(f"[DEBUG] optimizer has {total_params:,} parameters to update")
 
     train_data = blending_datasets(args.dataset, args.dataset_probs, strategy, args.seed, max_count=args.max_samples)
     
@@ -193,7 +171,6 @@ def train(args):
 
         return {"prompt": appended_prompt + base_prompt}
  
-
     train_data = train_data.map(map_prompt, remove_columns=train_data.column_names).select(range(min(args.max_samples, len(train_data))))
     train_dataset = PromptDataset(train_data, tokenizer, args.max_len, strategy, input_template=args.input_template)
     train_dataloader = strategy.setup_dataloader(train_dataset, args.micro_train_batch_size, True, True, train_dataset.collate_fn)
@@ -212,11 +189,11 @@ def train(args):
     ((model, optim, scheduler), ref_model) = strategy.prepare((model, optim, scheduler), ref_model)
 
     consumed_samples = 0
+    # Loading training state if load_ckpt=True
     if args.load_ckpt:
         strategy.print(f"Loading checkpoint from: {args.load_ckpt}")
         base_dir = args.load_ckpt
         tag="ds_checkpoint"
-        # engine.load_checkpoint returns (load_succeeded, client_state)
         loaded, client_state = strategy.engine.load_checkpoint(
             base_dir,
             tag=tag
@@ -227,6 +204,7 @@ def train(args):
             consumed_samples = client_state["consumed_samples"]
         else:
             consumed_samples = 0
+
     trainer = GRPOTrainer(
         model=model, ref_model=ref_model, reward_fn=sync_ruler_reward,
         tokenizer=tokenizer, strategy=strategy, optim=optim,

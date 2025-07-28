@@ -51,7 +51,6 @@ def init_model(args):
     return model, tokenizer
 
 def train(args):
-    # configure strategy
     def get_strategy(args):
         strategy = DeepspeedStrategy(
             seed=getattr(args, "seed", 42),
@@ -67,10 +66,7 @@ def train(args):
     strategy = get_strategy(args)
     strategy.setup_distributed()
 
-    # configure model
-    # load huggingface model
     base_model, tokenizer = init_model(args)
-    # 2. Create the LoRA config from args
     lora_config = LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
@@ -79,10 +75,8 @@ def train(args):
         task_type="CAUSAL_LM",
         target_modules=args.target_modules,
     )
-    # 3. Apply LoRA adapters to create the PEFT model
     peft_model = get_peft_model(base_model, lora_config)
     # peft_model = PeftModel.from_pretrained(peft_model, adapter_default, lora_config=lora_config)
-    # 4. Wrap the PEFT model in your Actor class
     model = Actor(
         peft_model,
         tokenizer=tokenizer,
@@ -95,11 +89,7 @@ def train(args):
     # for name, param in model.named_parameters():
     #     if param.requires_grad:
     #         strategy.print(name)
-    # --- REFERENCE MODEL CREATION ---
-    # 1. Load a FRESH, clean base model for the reference model
     ref_base_model, _ = init_model(args)
-    
-    # 2. Wrap the BASE model in the Actor class. NO LoRA.
     ref_model = Actor(
         ref_base_model,
         tokenizer=tokenizer,

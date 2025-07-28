@@ -13,7 +13,7 @@ mkdir -p "$OUTPUT_DIR"
 # === TRAIN CONFIG ===
 TRAIN_BATCH=8
 MICRO_BATCH=1
-ZERO_STAGE=2
+ZERO_STAGE=0
 BF16="--bf16"
 FLASH="--flash_attn"
 MAX_LEN=4096
@@ -64,6 +64,7 @@ deepspeed rlhf/train_grpo.py \
     --use_wandb dc953a73754e73f853a4148bed458100f5ed36f7 \
     --wandb_project "LLada-Reasoning" \
     --wandb_run_name "GRPO_training" \
+    --gradient_accumulation_steps 1 \
     $BF16 \
     $FLASH \
     $LORA_ARGS \

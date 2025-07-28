@@ -132,9 +132,8 @@ class DPOTrainer(ABC):
         if args.save_steps == -1:
             args.save_steps = float("inf")  # do not save ckpt
 
-        # Define constants for the new loop
-        n_t = 8  # Your number of Monte Carlo samples
-        eps = 0.1 # Your epsilon for mask ratio sampling
+        n_t = 8
+        eps = 0.1
 
         step = consumed_samples // args.train_batch_size * self.strategy.accumulated_gradient + 1
         start_epoch = consumed_samples // args.train_batch_size // num_update_steps_per_epoch
@@ -181,13 +180,10 @@ class DPOTrainer(ABC):
 
                 # --- START: New Monte Carlo & Gradient Accumulation Loop ---
                 for _ in range(n_t):
-                    # 1. Generate ONE random mask ratio `t` for a fair comparison
                     t = (1 - eps) * torch.rand(1).item() + eps
                     
-                    # 2. Process CHOSEN sequence with this `t`
                     _, masked_chosen, _ = self.forward_process(chosen_ids, t)
                     _, masked_rejected, _ = self.forward_process(reject_ids, t)
-                    # 3. Process REJECTED sequence with the SAME `t`
                     policy_chosen_logps = self.model(chosen_ids, c_mask, masked_chosen, t, prompt_id_lens)
                     with torch.no_grad():
                         ref_chosen_logps = self.ref_model(chosen_ids, c_mask, masked_chosen, t, prompt_id_lens)
@@ -198,7 +194,6 @@ class DPOTrainer(ABC):
 
                     # print("losses: ", policy_chosen_logps.shape, ref_chosen_logps.shape, policy_rejected_logps.shape, ref_rejected_logps.shape)
 
-                    # 4. Calculate DPO loss for this SINGLE, FAIR comparison
                     loss, chosen_reward, reject_reward = self.loss_fn(
                         policy_chosen_logps,
                         policy_rejected_logps,
@@ -207,21 +202,15 @@ class DPOTrainer(ABC):
                     )
                     # print("loss: ", loss.shape, chosen_reward.shape, reject_reward.shape)
                     
-                    # 5. Scale loss for averaging and backpropagate.
-                    # This accumulates gradients correctly without memory spikes.
                     scaled_loss = loss / n_t
                     self.strategy.backward(scaled_loss, self.model, self.optimizer)
 
-                    # Accumulate stats for logging
                     batch_loss_sum += loss.item()
                     batch_chosen_reward_sum += chosen_reward.mean().item()
                     batch_reject_reward_sum += reject_reward.mean().item()
-                # --- END: New Monte Carlo & Gradient Accumulation Loop ---
 
-                # 6. Step the optimizer AFTER all gradients are accumulated
                 self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
                 
-                # Update logs with the averaged values from the MC samples
                 avg_loss = batch_loss_sum / n_t
                 avg_chosen_reward = batch_chosen_reward_sum / n_t
                 avg_reject_reward = batch_reject_reward_sum / n_t
@@ -236,12 +225,9 @@ class DPOTrainer(ABC):
                     "lr": self.scheduler.get_last_lr()[0],
                 }
 
-                # step bar
                 logs_dict = self.strategy.all_reduce(logs_dict)
                 step_bar.set_postfix(logs_dict)
                 step_bar.update()
-
-                # Global step for logging and checkpointing
                 if step % self.strategy.accumulated_gradient == 0:
                     global_step = step // self.strategy.accumulated_gradient
                     client_states = {"consumed_samples": global_step * args.train_batch_size}
@@ -275,7 +261,6 @@ class DPOTrainer(ABC):
 
         # eval
         if global_step % args.eval_steps == 0 and self.eval_dataloader is not None:
-            # do eval when len(dataloader) > 0, avoid zero division in eval.
             if len(self.eval_dataloader) > 0:
                 self.evaluate(self.eval_dataloader, global_step)
 
@@ -312,7 +297,6 @@ class DPOTrainer(ABC):
 
                 _, masked_chosen, _ = self.forward_process(chosen_ids, t)
                 _, masked_rejected, _ = self.forward_process(reject_ids, t)
-                # 3. Process REJECTED sequence with the SAME `t`
                 policy_chosen_logps = self.model(chosen_ids, c_mask, masked_chosen, prompt_id_lens, t)
                 ref_chosen_logps = self.ref_model(chosen_ids, c_mask, masked_chosen, prompt_id_lens, t)
                 
@@ -340,7 +324,7 @@ class DPOTrainer(ABC):
                 elif self._tensorboard is not None:
                     for k, v in logs.items():
                         self._tensorboard.add_scalar(f"eval/{k}", v, steps)
-        self.model.train()  # reset model state
+        self.model.train()
 
     def _get_batch_logps(
         self,

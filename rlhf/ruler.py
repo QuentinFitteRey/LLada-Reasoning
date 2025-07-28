@@ -18,7 +18,6 @@ def id(x):
     return x
 
 def softmax(xs):
-    # numerically stable softmax
     m = max(xs)
     exps = [math.exp(x - m) for x in xs]
     S   = sum(exps)
@@ -26,7 +25,6 @@ def softmax(xs):
 
 
 async def ruler_reward(prompts, answers, normalize_fn=scalling, judge_model="ollama/qwen3:30b-a3b-fp16"):
-    # Setup the shared system/user prompt
     rewards = []
     for i in range(len(prompts)):
         print(f"Processing prompt {i + 1}/{len(prompts)}")
@@ -37,7 +35,6 @@ async def ruler_reward(prompts, answers, normalize_fn=scalling, judge_model="oll
 
         trajectories = []
 
-        # Add the original answer as the first trajectory
         for answer in answers[i*len(answers)//len(prompts):(i+1)*len(answers)//len(prompts)]:
             trajectories.append(
                 Trajectory(messages_and_choices=[
@@ -77,8 +74,6 @@ async def ruler_reward(prompts, answers, normalize_fn=scalling, judge_model="oll
     Your output must contain the numerical score. You can provide explanations.
         """
         group = TrajectoryGroup(trajectories)
-        # print("Here!")
-        # print("Evaluating group with custom rubric...")
         try:
             judged = await ruler_score_group(group, judge_model, rubric=custom_rubric, extra_litellm_params={"api_base": "http://127.0.0.1:11435"})
             if judged: 
@@ -103,8 +98,6 @@ def sync_ruler_reward(texts: list[str], prompt: str) -> list[float]:
     # run the async function to completion on the current event loop
     loop = asyncio.get_event_loop()
     if loop.is_running():
-        # If you’re already inside an asyncio loop (rare in a plain training script),
-        # fall back to creating a new one:
         return asyncio.run(ruler_reward(prompt, texts))
     else:
         return loop.run_until_complete(ruler_reward(prompt, texts))
@@ -548,5 +541,4 @@ solve()
     """
 
     answers = [answer1, answer3, answer2, answer4]
-    # asyncio.run(ruler_reward(prompt, answers))
     print(sync_ruler_reward(answers, prompt))

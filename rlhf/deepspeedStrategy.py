@@ -240,6 +240,7 @@ class DeepspeedStrategy(ABC):
             args={"local_rank": int(os.environ.get("LOCAL_RANK", "-1"))},
             dist_init_required=True,
         )
+        engine.checkpoint_engine.zipfile_serialization = False
         self.engine = engine
         if self.deepcompile:
             engine.compile()
@@ -451,6 +452,10 @@ class DeepspeedStrategy(ABC):
         if not dist.is_initialized():
             return 0
         return dist.get_rank()
+    
+    def zero_grad(self):
+        # self.engine was set in _ds_init_train_model
+        self.engine.zero_grad()
 
     def save_ckpt(self, model, save_dir, tag=None, max_num=3, max_mem=1000, client_state={}, save_latest=True):
         assert isinstance(model, deepspeed.DeepSpeedEngine)

@@ -41,11 +41,9 @@ class GRPOLoss:
 
         advantages = rewards.detach() - rewards.mean(dim=1, keepdim=True).detach()
         
-        # --- Probability Ratio Calculation ---
         log_ratio = policy_logprobs - old_policy_logprobs
         log_ratio = torch.clamp(log_ratio, min=-10.0, max=+10.0)
         ratio = torch.exp(log_ratio)
-        # ---
         
         unclipped_loss = ratio * advantages
         clipped_ratio = torch.clamp(ratio, 1.0 - self.epsilon, 1.0 + self.epsilon)
