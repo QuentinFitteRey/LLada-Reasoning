@@ -4,7 +4,6 @@ import argparse
 from datasets import load_dataset, concatenate_datasets, DatasetDict
 from transformers import AutoTokenizer
 
-# --- Configuration ---
 SOURCE_DATASET_ID = "nvidia/Llama-Nemotron-Post-Training-Dataset"
 CATEGORIES_TO_SAMPLE = {
     "math": 50000,
@@ -16,7 +15,6 @@ CATEGORIES_TO_SAMPLE = {
 }
 AVG_CHARS_PER_TOKEN = 4
 
-# --- Data Conversion & Processing Functions ---
 
 def to_conversation(example):
     """
@@ -25,10 +23,8 @@ def to_conversation(example):
     prepending the 'system_prompt' column from the dataset to the user's message.
     """
     user_content = example.get("input", "")
-    # Get the system prompt from the example itself
     system_prompt = example.get("system_prompt", "")
 
-    # Combine the system prompt and user content into a single user message
     if system_prompt:
         full_user_prompt = system_prompt + " " + user_content
     else:
@@ -63,7 +59,6 @@ def preprocess_batch(examples, tokenizer, max_len):
         "assistant": [c["assistant"] for c in final_convs],
     }
 
-# --- Main Execution Logic ---
 def main():
     parser = argparse.ArgumentParser(
         description="Filter and sample the Llama-Nemotron dataset by category and length."
@@ -75,19 +70,19 @@ def main():
     parser.add_argument("--batch_size", type=int, default=1000, help="Batch size for preprocessing.")
     args = parser.parse_args()
 
-    print(f"🔵 Loading tokenizer: '{args.model_name}'...")
+    print(f"Loading tokenizer: '{args.model_name}'...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     
-    print(f"🔵 Loading the full dataset: {SOURCE_DATASET_ID}...")
+    print(f"Loading the full dataset: {SOURCE_DATASET_ID}...")
     full_dataset = load_dataset(SOURCE_DATASET_ID, split="train")
-    print(f"✅ Full dataset loaded with {len(full_dataset):,} examples.")
+    print(f"Full dataset loaded with {len(full_dataset):,} examples.")
 
     train_subsets = []
     val_subsets = []
     category_stats = {}
 
     for category, sample_size in CATEGORIES_TO_SAMPLE.items():
-        print(f"\n🔎 Processing category: '{category}'")
+        print(f"\nProcessing category: '{category}'")
 
         filtered_by_category = full_dataset.filter(
             lambda example: example["category"] == category,
@@ -104,10 +99,10 @@ def main():
         )
 
         available_examples = len(valid_length_subset)
-        print(f"📊 Found {available_examples:,} valid examples for '{category}' after length filtering.")
+        print(f"Found {available_examples:,} valid examples for '{category}' after length filtering.")
         
         if available_examples < sample_size:
-            print(f"⚠️ WARNING: Using all available {available_examples:,} examples, as this is less than the requested {sample_size:,}.")
+            print(f"WARNING: Using all available {available_examples:,} examples, as this is less than the requested {sample_size:,}.")
             final_sample_size = available_examples
         else:
             final_sample_size = sample_size
@@ -132,11 +127,11 @@ def main():
         }
 
     if not train_subsets:
-        print("\n❌ No data was sampled. Exiting.")
+        print("\nNo data was sampled. Exiting.")
         return
         
     print("\n" + "="*60)
-    print("📊 Final Sample Statistics:")
+    print("Final Sample Statistics:")
     total_train, total_val = 0, 0
     print(f"  - {'CATEGORY':<22} | {'TRAIN':>10} | {'VALIDATION':>12}")
     print("  " + "-"*50)
@@ -148,18 +143,18 @@ def main():
     print(f"  - {'TOTAL':<22} | {total_train:>10,} | {total_val:>12,}")
     print("="*60)
     
-    print("\n🔗 Combining all train and validation subsets...")
+    print("\nCombining all train and validation subsets...")
     combined_train_ds = concatenate_datasets(train_subsets).shuffle(seed=42)
     combined_val_ds = concatenate_datasets(val_subsets).shuffle(seed=42)
     
-    print(f"\n💾 Saving final dataset...")
+    print(f"\nSaving final dataset...")
     output_dd = DatasetDict({
         "train": combined_train_ds,
         "validation": combined_val_ds
     })
     os.makedirs(args.out_dir, exist_ok=True)
     output_dd.save_to_disk(args.out_dir)
-    print(f"\n✅ Success! Dataset saved to '{args.out_dir}'")
+    print(f"\nSuccess! Dataset saved to '{args.out_dir}'")
     print(f"Final train samples: {len(combined_train_ds):,}")
     print(f"Final validation samples: {len(combined_val_ds):,}")
 

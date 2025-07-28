@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J llada_sft_run
-#SBATCH -o /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/sft_newdataset/logs/sft_run.out
-#SBATCH -e /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/sft_newdataset/logs/sft_run.err
+#SBATCH -o /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/sft_newdataset/logs/sft_run3.out
+#SBATCH -e /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/sft_newdataset/logs/sft_run3.err
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:H200:8
@@ -28,8 +28,6 @@ srun torchrun --nproc_per_node=8 --master_port=29405 sft_training/sft_train_new_
     --batch-size 128 \
     --warmup-ratio 0.1 \
     --lora-target-modules q_proj v_proj k_proj attn_out \
-    --eps 1e-3
-    
-    # --- Optional flags for resuming a run ---
-    # --sft-lora-weights ./checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-XXXX/ \
-    # --resume-from-checkpoint ./checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-XXXX/
+    --eps 1e-3 \
+    --sft-lora-weights ./checkpoints/sft_newdataset/step-400/sft_adapter \
+     --resume-from-checkpoint ./checkpoints/sft_newdataset/step-400/

@@ -16,16 +16,13 @@ import wandb
 import time
 import math
 
-# Assuming llada_local is in the python path
 from llada_local.modeling_llada import LLaDAModelLM
 from llada_local.configuration_llada import ActivationCheckpointingStrategy
 
-# -------- DDP Setup --------
 def setup_ddp():
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
-# -------- SFT Dataset & Collator (Unchanged) --------
 class SFTDataset(Dataset):
     def __init__(self, dataset, tokenizer, max_length):
         self.dataset, self.tokenizer, self.max_length = dataset, tokenizer, max_length
@@ -61,7 +58,6 @@ class SFTDataCollator:
         padded_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.pad_id)
         return {'input_ids': padded_ids, 'prompt_lengths': prompt_lengths}
 
-# -------- Core Functions --------
 def forward_process(input_ids, mask_token_id, mask_ratio):
     b, l = input_ids.shape
     device = input_ids.device
@@ -134,22 +130,21 @@ def run_validation(model, loader, dev, mask_id, pad_id, eps, think_end_id, answe
     model.train()
     return avg_loss
 
-# -------- Main --------
 def main():
     parser = argparse.ArgumentParser(description='SFT for LLaDA with Multi-Stage LoRA')
-    # Model and Data Paths
+
     parser.add_argument('--pretrained-model', type=str, default="./merged_model_good_base", help="Path to the base Hugging Face model.")
     parser.add_argument('--sft-data', type=str, default='./filtered_conversational_dataset/', help='Path to SFT DatasetDict.')
     parser.add_argument('--output-dir', type=str, default='./checkpoints/checkpoints_llada_nemotron_pretrain', help='Directory to save checkpoints and logs.')
     parser.add_argument('--pretraining-lora-weights', type=str, default=None, help="Optional: Path to non-trainable LoRA weights from pre-training stage.")
     parser.add_argument('--sft-lora-weights', type=str, default=None, help="Optional: Path to trainable LoRA weights from a previous SFT run to continue training.")
     parser.add_argument('--resume-from-checkpoint', type=str, default=None, help="Path to resume trainer state (optimizer, scheduler, step).")
-    # LoRA options (for creating a new adapter)
+
     parser.add_argument('--lora-r', type=int, default=128)
     parser.add_argument('--lora-alpha', type=int, default=256)
     parser.add_argument('--lora-dropout', type=float, default=0.05)
     parser.add_argument('--lora-target-modules', nargs='+', default=['q_proj', 'v_proj', 'k_proj', 'o_proj'])
-    # Other arguments
+
     parser.add_argument('--torch-dtype', type=str, default='bfloat16', choices=['float32', 'bfloat16', 'float16'])
     parser.add_argument('--activation-checkpointing', action='store_true', default=True)
     parser.add_argument('--batch-size', type=int, default=64)
@@ -158,10 +153,10 @@ def main():
     parser.add_argument('--epochs', type=int, default=2)
     parser.add_argument('--lr', type=float, default=2e-5)
     parser.add_argument('--weight-decay', type=float, default=0.1)
-    parser.add_argument('--warmup-ratio', type=float, default=0.1) # Changed to ratio
+    parser.add_argument('--warmup-ratio', type=float, default=0.1)
     parser.add_argument('--min-lr-ratio', type=float, default=0.1)
     parser.add_argument('--grad-clip-norm', type=float, default=1.0)
-    # NEW: Argument for eps-based dynamic masking
+
     parser.add_argument('--eps', type=float, default=1e-3, help="Epsilon for dynamic masking, setting the minimum mask ratio.")
     parser.add_argument('--answer-weight', type=float, default=1.0, help="Weight to apply to the loss on tokens in the final answer (after </think>).")
     parser.add_argument('--validation-interval', type=int, default=100)
@@ -178,10 +173,9 @@ def main():
     device = torch.device(f"cuda:{os.environ['LOCAL_RANK']}")
     is_main = rank == 0
 
-    # --- W&B and State Resuming Logic ---
     wandb_run_id = args.wandb_run_id
     start_epoch, global_step = 0, 0
-    start_dataloader_step = -1 # ADDED: Default to -1 (no skipping)
+    start_dataloader_step = -1 
 
     if args.resume_from_checkpoint:
         state_path = os.path.join(args.resume_from_checkpoint, "trainer_state.pt")
@@ -190,7 +184,6 @@ def main():
             state = torch.load(state_path, map_location='cpu')
             if not wandb_run_id:
                 wandb_run_id = state.get("wandb_run_id")
-            # ADDED: Load the dataloader step if it exists in the checkpoint
             start_dataloader_step = state.get("dataloader_step", -1)
         else:
             state = None
@@ -204,7 +197,6 @@ def main():
             wandb_run_id = wandb.util.generate_id()
             wandb.init(project=args.wandb_project, id=wandb_run_id, config=vars(args))
 
-    # Layered Model & LoRA Loading Logic
     dtype = getattr(torch, args.torch_dtype)
     if is_main: print(f"Loading base model: {args.pretrained_model}")
     model = LLaDAModelLM.from_pretrained(
@@ -215,7 +207,7 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model, use_fast=True)
     special_tokens_to_add = {
-        "additional_special_tokens": ["<|mdm_mask|>", "<|start_header_id|>", "<|end_header_id|>","<|eot_id|>","<|begin_of_thought|>","<|end_of_thought|>" "<|begin_of_solution|>", "<|end_of_solution|>"]
+        "additional_special_tokens": ["<|mdm_mask|>", "<|start_header_id|>", "<|end_header_id|>","<|eot_id|>","<|begin_of_thought|>","<|end_of_thought|>", "<|begin_of_solution|>", "<|end_of_solution|>"]
     }
 
     if tokenizer.pad_token is None:
@@ -224,7 +216,7 @@ def main():
     model.resize_token_embeddings(len(tokenizer))
     if is_main:
         print(f"Added special tokens and resized model embeddings. New vocabulary size: {len(tokenizer)}")
-    think_end_id = tokenizer.convert_tokens_to_ids("</think>")
+    think_end_id = tokenizer.convert_tokens_to_ids("<|end_of_thought|>")
 
     if args.sft_lora_weights:
         if is_main: print(f"Resuming SFT training from checkpoint: {args.sft_lora_weights}")
@@ -279,19 +271,19 @@ def main():
         filter(lambda p: p.requires_grad, model.parameters()), 
         lr=args.lr, 
         weight_decay=args.weight_decay,
-        betas=(0.9, 0.999),  # <-- Add this
-        eps=1e-08             # <-- Add this
+        betas=(0.9, 0.999),  
+        eps=1e-08             
     )
     accum_steps = args.batch_size // (args.local_batch * world_size)
     total_steps = (len(train_loader) // accum_steps) * args.epochs
     warmup_steps = int(total_steps * args.warmup_ratio) 
     if is_main: print(f"Total steps: {total_steps}, Warmup steps: {warmup_steps}")
     def lr_fn(step):
-        if step < warmup_steps: return float(step) / float(max(1, warmup_steps)) # Use new variable
+        if step < warmup_steps: return float(step) / float(max(1, warmup_steps)) 
         p = (step - warmup_steps) / (total_steps - warmup_steps)
         return max(args.min_lr_ratio, 0.5 * (1.0 + math.cos(math.pi * p)))
     scheduler = LambdaLR(optimizer, lr_fn)
-
+    
     if state:
         optimizer.load_state_dict(state["optimizer"])
         scheduler.load_state_dict(state["scheduler"])
@@ -314,18 +306,21 @@ def main():
     dist.barrier()
 
     if is_main: print("\nStarting SFT training...")
+    
+    loss_accumulator = 0.0
     model.train()
     for epoch in range(start_epoch, args.epochs):
         train_sampler.set_epoch(epoch)
         for step, batch in enumerate(train_loader):
-            # ADDED: Logic to skip to the correct step on resume
             if epoch == start_epoch and step <= start_dataloader_step:
                 print(step)
                 continue
 
             batch = {k: v.to(device) for k, v in batch.items()}
             loss, log_loss = calc_sft_loss(model, batch, mask_id, pad_id, eps=args.eps, think_end_id=think_end_id, answer_weight=args.answer_weight)
-            if loss is not None: (loss / accum_steps).backward()
+            if loss is not None: 
+                loss_accumulator += log_loss 
+                (loss / accum_steps).backward()
 
             if (step + 1) % accum_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
@@ -333,8 +328,10 @@ def main():
                 global_step += 1
 
                 if is_main:
-                    print(f"E:{epoch+1} S:{global_step}/{total_steps} L:{log_loss:.4f} LR:{scheduler.get_last_lr()[0]:.2e}")
-                    if args.use_wandb: wandb.log({"train/loss": log_loss, "train/lr": scheduler.get_last_lr()[0]}, step=global_step)
+                    avg_loss = loss_accumulator / accum_steps
+                    print(f"E:{epoch+1} S:{global_step}/{total_steps} L:{avg_loss:.4f} LR:{scheduler.get_last_lr()[0]:.2e}")
+                    if args.use_wandb: wandb.log({"train/avg_loss": avg_loss, "train/lr": scheduler.get_last_lr()[0]}, step=global_step)
+                    loss_accumulator = 0.0
 
                 if global_step > 0 and global_step % args.validation_interval == 0:
                     val_loss = run_validation(model, val_loader, device, mask_id, pad_id, eps=args.eps, limit=args.val_limit_batches, think_end_id=think_end_id, answer_weight=args.answer_weight)
@@ -355,7 +352,7 @@ def main():
                             "scheduler": scheduler.state_dict(),
                             "global_step": global_step,
                             "epoch": epoch,
-                            "dataloader_step": step, # MODIFIED: Save the dataloader step
+                            "dataloader_step": step, 
                             "rng_state_cpu": torch.get_rng_state(),
                             "rng_state_gpu": torch.cuda.get_rng_state(),
                             "wandb_run_id": wandb_run_id
@@ -363,7 +360,6 @@ def main():
                         torch.save(state, os.path.join(ckpt_dir, "trainer_state.pt"))
                         print(f"   Checkpoint saved: {ckpt_dir}")
                     dist.barrier()
-        # MODIFIED: Reset dataloader step counter after the first epoch of a resumed run is complete
         start_dataloader_step = -1
 
 
