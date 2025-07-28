@@ -1,0 +1,25 @@
+---------------------------------------
+Begin Slurm Prolog: Jul-21-2025 09:58:21
+Job ID:    2704810
+User ID:   qfitterey3
+Account:   coc
+Job name:  sft_redun.sh
+Partition: coc-cpu
+QOS:       coc-ice
+---------------------------------------
+✅ Found latest checkpoint: /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-600
+Submitted job 2705573 with args: --resume-from-checkpoint /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-600 --sft-lora-weights /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/checkpoints_llada_nemotron_15_4_goodlora/step-600/sft_adapter
+Submitted batch job 2705574
+Chained next job to run after job 2705573 finishes.
+---------------------------------------
+Begin Slurm Epilog: Jul-21-2025 09:58:22
+Job ID:        2704810
+User ID:       qfitterey3
+Account:       coc
+Job name:      sft_redun.sh
+Resources:     cpu=1,mem=4G,node=1
+Rsrc Used:     cput=00:00:01,vmem=0,walltime=00:00:01,mem=4380K,energy_used=0
+Partition:     coc-cpu
+QOS:           coc-ice
+Nodes:         atl1-1-02-003-19-1
+---------------------------------------

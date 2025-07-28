@@ -61,6 +61,20 @@ def init_model(
     print(f"len(tokenizer): \n {len(tokenizer)}")
 
     print("Model loaded successfully with local modifications.")
+    print(model)
+    # special_tokens_to_add = {
+    # "additional_special_tokens": ["<|mdm_mask|>", "<think>", "</think>"]
+    # }
+
+    # if tokenizer.pad_token is None:
+    #     special_tokens_to_add["pad_token"] = "<|pad|>"
+
+    # # Add tokens to tokenizer
+    # tokenizer.add_special_tokens(special_tokens_to_add)
+
+    # # Resize embeddings of the entire PeftModel
+    model.resize_token_embeddings(len(tokenizer))
+    print(len(tokenizer))
 
     load_kwargs = {
         "trust_remote_code": trust_remote_code,

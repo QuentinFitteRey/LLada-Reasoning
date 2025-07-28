@@ -44,8 +44,11 @@ class LLaDAEvalHarness(LM):
         model_path: str = "./llada_local",
         adapter_path: str | None = None,
         load_lora: bool = False,
+        model_path: str = "./llada_local",
+        adapter_path: str | None = None,
+        load_lora: bool = False,
         mask_id=126336,
-        max_length=4096,
+        max_length=8192,
         batch_size=32,
         mc_num=128,
         is_check_greedy=True,
@@ -112,6 +115,11 @@ class LLaDAEvalHarness(LM):
         tokenizer.padding_side = "left"
         self.tokenizer = tokenizer
         self.model.eval()
+        print("number of steps:", steps)
+        print("gen_length:", gen_length)
+        print("block_length:", block_length)
+        print("remasking:", remasking)
+
 
         # self.device = torch.device(device)
         if self.accelerator is not None:

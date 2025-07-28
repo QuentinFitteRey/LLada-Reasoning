@@ -42,6 +42,11 @@ try:
     FLEX_ATTN_AVAILABLE = True
 except:
     FLEX_ATTN_AVAILABLE = False
+try:
+    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+    FLEX_ATTN_AVAILABLE = True
+except:
+    FLEX_ATTN_AVAILABLE = False
 import torch
 import torch.backends.cuda
 import torch.nn as nn
@@ -76,7 +81,7 @@ __all__ = [
     "RMSLayerNorm",
     "GemmaRMSLayerNorm",
     "RotaryEmbedding",
-    "YarnRotaryEmbedding",
+    "YarnRotaryEmbedding", # ADDED
     "Activation",
     "GELU",
     "ReLU",
@@ -91,6 +96,9 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
+@torch.compile()
+def scaled_dot_product_attention(q, k, v, mask=None, attn_mask=None, dropout_p=0.0, is_causal=False):
+    return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
 @torch.compile()
 def scaled_dot_product_attention(q, k, v, mask=None, attn_mask=None, dropout_p=0.0, is_causal=False):
     return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
@@ -112,6 +120,7 @@ def init_weights(
 ) -> None:
     """
     Initialize weights of a linear or embedding module.
+
 
     :param config: The model config.
     :param module: The linear or embedding submodule to initialize.
@@ -689,7 +698,6 @@ def alibi_attention_bias(seq_len: int, config: ModelConfig, device: torch.device
     # shape: (1, n_heads, seq_len, seq_len)
     return alibi_bias * (1.0 / (2 ** m.view(1, config.n_heads, 1, 1)))  # type: ignore
 
-
 class LLaDABlock(nn.Module):
     """
     A base class for transformer block implementations.
@@ -739,7 +747,9 @@ class LLaDABlock(nn.Module):
         )
         self.ff_out._is_residual = True  # type: ignore
 
+        # MODIFIED: Add conditional logic for RoPE or YaRN
         # Rotary embeddings.
+        self.rotary_emb = None
         if self.config.rope:
             self.rotary_emb = RotaryEmbedding(config, self.__cache)
         elif getattr(self.config, 'yarn', False):
@@ -826,23 +836,28 @@ class LLaDABlock(nn.Module):
 
             # Modify: MDM set causal to False, and with no attn_mask.
             return scaled_dot_product_attention(
+            return scaled_dot_product_attention(
                 q,
                 k,
                 v,
+                attn_mask=attn_mask,
                 attn_mask=attn_mask,
                 dropout_p=dropout_p,
                 is_causal=False,
             )
 
+    # MODIFIED: attention method to handle both RoPE and YaRN with robust KV caching
     def attention(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
         attention_bias: Optional[torch.Tensor] = None,
         layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
+        replace_position: Optional[torch.Tensor] = None,
         replace_position: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, T, C = q.size()  # batch size, sequence length, d_model
@@ -857,9 +872,7 @@ class LLaDABlock(nn.Module):
         # shape: (B, nh, T, hs)
         # self.config.n_heads: 32
         q = q.view(B, T, self.config.n_heads, C // self.config.n_heads).transpose(1, 2)
-        # shape: (B, n_kv_h, T, hs)
         k = k.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads).transpose(1, 2)
-        # shape: (B, n_kv_h, T, hs)
         v = v.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads).transpose(1, 2)
 
         if layer_past is not None: 
@@ -903,16 +916,11 @@ class LLaDABlock(nn.Module):
 
         if attention_bias is not None:
             # Resize and cast attention bias.
-            # The current dtype of the attention bias might not match the dtype that the SDP attn function will
-            # run in if AMP is enabled, and this can be a problem if some tokens are masked out due to padding
-            # as down-casting the attention bias to the autocast precision will result in -infs, which will
-            # cause the SDP attn function to produce NaNs.
             attention_bias = self._cast_attn_bias(
                 attention_bias[:, :, key_len - query_len : key_len, :key_len], dtype
             )
 
         # Get the attention scores.
-        # shape: (B, nh, T, hs)
         att = self._scaled_dot_product_attention(
             q,
             k,
@@ -1347,8 +1355,8 @@ class LLaDAModel(nn.Module):
         if self.config.alibi and self.config.flash_attention:
             raise Exception("ALiBi is currently not supported with FlashAttention")
 
-        if self.config.alibi and self.config.rope:
-            raise Exception("ALiBi and RoPE are mutually exclusive")
+        if self.config.alibi and self.config.rope and self.config.yarn:
+            raise Exception("ALiBi, RoPE and Yarn are mutually exclusive")
 
         if self.config.embedding_size is not None and self.config.embedding_size != self.config.vocab_size:
             if self.config.embedding_size < self.config.vocab_size:
@@ -1393,6 +1401,7 @@ class LLaDAModel(nn.Module):
             self.transformer.update({"blocks": nn.ModuleList(blocks)})
 
         if not (self.config.alibi or self.config.rope or self.config.yarn):
+        if not (self.config.alibi or self.config.rope or self.config.yarn):
             self.transformer.update(
                 {"wpe": nn.Embedding(config.max_sequence_length, config.d_model, device=config.init_device)}
             )
@@ -1415,6 +1424,7 @@ class LLaDAModel(nn.Module):
         if self.config.alibi:
             get_causal_attention_bias(self.__cache, config.max_sequence_length, _non_meta_init_device(config))
             self.get_alibi_attention_bias(config.max_sequence_length, _non_meta_init_device(config))
+
 
 
     def set_activation_checkpointing(self, strategy: Optional[ActivationCheckpointingStrategy]):
@@ -1485,6 +1495,7 @@ class LLaDAModel(nn.Module):
         last_logits_only: bool = False,
         output_hidden_states: Optional[bool] = None,
         replace_position: Optional[torch.Tensor] = None,
+        replace_position: Optional[torch.Tensor] = None,
     ) -> LLaDAOutput:
         """
         :param input_ids: A tensor of shape `(batch_size, seq_len)`.
@@ -1495,18 +1506,22 @@ class LLaDAModel(nn.Module):
             the corresponding input ID should *not* be ignored. A `0` means
             that the corresponding input ID is masked.
 
+
             This has the same meaning as the `attention_mask` in HuggingFace's `transformers`
             library.
         :param attention_bias: A tensor of shape `(batch_size, 1, seq_len, seq_len)`,
             `(1, 1, seq_len, seq_len)`, or `(seq_len, seq_len)`. This is used
             to introduce causal or other biases.
 
+
             If the tensor is a bool or byte tensor, a `True` or `1` at `attention_bias[:, :, i, j]`
             indicates that the i-th element in the sequence is allowed to attend to the j-th
             element in the sequence.
 
+
             If the tensor is a float tensor, it will just be added to the attention
             scores before the softmax.
+
 
             The default is causal, which corresponds to a lower-diagonal byte matrix of ones.
         :param past_key_values: Pre-computed keys and values for each attention block.
@@ -1539,6 +1554,7 @@ class LLaDAModel(nn.Module):
         if self.config.input_emb_norm:
             x = x * (self.config.d_model**0.5)
 
+        if not (self.config.alibi or self.config.rope or self.config.yarn):
         if not (self.config.alibi or self.config.rope or self.config.yarn):
             # Get positional embeddings.
             # shape: (1, seq_len)
@@ -1626,9 +1642,11 @@ class LLaDAModel(nn.Module):
                     # shape: (batch_size, seq_len, d_model)
                     x, cache = self._activation_checkpoint_fn(
                         block, x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position
+                        block, x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position
                     )
                 else:
                     # shape: (batch_size, seq_len, d_model)
+                    x, cache = block(x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position)
                     x, cache = block(x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position)
                 if attn_key_values is not None:
                     assert cache is not None
@@ -1708,7 +1726,10 @@ class LLaDAModelLM(PreTrainedModel):
             self.model = LLaDAModel(model_config, init_params=init_params)
         else:
             self.model = model
-
+    def set_activation_checkpointing(self, strategy: Optional[ActivationCheckpointingStrategy]):
+        """Passes the activation checkpointing command to the core model."""
+        self.model.set_activation_checkpointing(strategy)
+        
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1722,6 +1743,7 @@ class LLaDAModelLM(PreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         replace_position: Optional[torch.Tensor] = None,  # This is a hack mitigation of an issue in transformers `4.39.x`
+        replace_position: Optional[torch.Tensor] = None,  # This is a hack mitigation of an issue in transformers `4.39.x`
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if use_cache is None:
             use_cache = self.config.use_cache
@@ -1730,6 +1752,7 @@ class LLaDAModelLM(PreTrainedModel):
             raise ValueError("output_attentions is not yet supported in LLaDA")
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        # import pdb; pdb.set_trace()
         # import pdb; pdb.set_trace()
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model.forward(
@@ -1741,7 +1764,9 @@ class LLaDAModelLM(PreTrainedModel):
             use_cache=use_cache,
             output_hidden_states=output_hidden_states,
             replace_position=replace_position,
+            replace_position=replace_position,
         )
+        # import pdb; pdb.set_trace()
         # import pdb; pdb.set_trace()
         logits = outputs.logits
         hidden_states = outputs.hidden_states
