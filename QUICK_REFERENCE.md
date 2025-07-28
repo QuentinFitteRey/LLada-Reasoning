@@ -156,22 +156,7 @@ python generation.py --model_path ./merged_model
 # not passed as command line arguments
 ```
 
-## Monitoring and Debugging
 
-### Check System Status
-```bash
-# GPU status
-nvidia-smi
-
-# Monitor GPU usage
-watch -n 1 nvidia-smi
-
-# Check CUDA availability
-python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}, Devices: {torch.cuda.device_count()}')"
-
-# Check model loading
-python -c "from llada_local.modeling_llada import LLaDAModelLM; print('Model import successful')"
-```
 
 ### Training Progress
 ```bash
