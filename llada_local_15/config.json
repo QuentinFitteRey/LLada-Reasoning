@@ -50,7 +50,6 @@
   "scale_logits": false,
   "transformers_version": "4.46.3",
   "use_cache": true,
-  "use_cache": true,
   "vocab_size": 126464,
   "weight_tying": false,
   "yarn": true,

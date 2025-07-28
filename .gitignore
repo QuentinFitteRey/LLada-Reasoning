@@ -215,3 +215,4 @@ validation/
 filtered_conversational_dataset/
 filtered_conversational_dataset_4k/
 
+*.safetensors
