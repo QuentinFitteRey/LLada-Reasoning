@@ -8,7 +8,7 @@ A comprehensive training framework for large language diffusion models with reas
 ```bash
 git clone https://github.com/QuentinFitteRey/LLada-Reasoning
 cd LLada-Reasoning/
-conda create -n llada python=3.11
+conda create -n llada python=3.11 -y
 conda activate llada
 pip install -r requirements.txt
 ```
