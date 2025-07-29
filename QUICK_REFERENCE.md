@@ -5,7 +5,7 @@
 # Setup
 git clone https://github.com/QuentinFitteRey/LLada-Reasoning
 cd LLada-Reasoning/
-conda create -n llada python=3.11
+conda create -n llada python=3.11 -y
 conda activate llada
 pip install -r requirements.txt
 
@@ -141,19 +141,40 @@ python merge_model.py \
 ### Evaluation
 ```bash
 # Run evaluation
-python eval_llada.py \
-    --model_path ./merged_model \
-    --eval_tasks gsm8k,hellaswag \
-    --output_dir ./eval_results
+
+# Model with no adaptater
+accelerate launch \
+  --multi_gpu \
+  --num_processes 4 \
+  --mixed_precision bf16 \
+  eval_llada.py \
+    --tasks [TASK_NAME (eg. gsm8k)] \
+    --num_fewshot [number allowed by the benchmark (eg. 5)] \
+    --model llada_dist \
+    --batch_size 1 \
+    --model_args 'model_path=/path/to/model,load_lora=False,cfg=0.0,is_check_greedy=False,mc_num=128,gen_length=256,steps=256,block_length=16,temperature=0.0'
+
+# Model with adapater
+accelerate launch \
+  --multi_gpu \
+  --num_processes 4 \
+  --mixed_precision bf16 \
+  eval_llada.py \
+    --tasks [TASK_NAME (eg. gsm8k)] \
+    --num_fewshot [number allowed by the benchmark (eg. 5)] \
+    --model llada_dist \
+    --batch_size 1 \
+    --model_args 'model_path=/path/to/model,adapter_path=/path/to/adaptater,load_lora=True,cfg=0.0,is_check_greedy=False,mc_num=128,gen_length=1024,steps=1024,block_length=16,temperature=0.0' 
 ```
 
 ### Text Generation
 ```bash
-# Generate text (edit prompts directly in the generation.py file)
-python generation.py --model_path ./merged_model
+# Generate text (edit prompts and model paths directly in the generation.py file)
+python generation.py
 
 # Note: Prompts are configured inside the generation.py script, 
 # not passed as command line arguments
+# idem for model paths
 ```
 
 
@@ -232,7 +253,15 @@ python merge_model.py \
     --output_path ./final_model
 
 # 7. Evaluation
-python eval_llada.py --model_path ./final_model
+# Model with no adaptater
+accelerate launch \
+  --multi_gpu \
+  --num_processes 4 \
+  --mixed_precision bf16 \
+  eval_llada.py \
+    --tasks [TASK_NAME (eg. gsm8k)] \
+    --num_fewshot [number allowed by the benchmark (eg. 5)] \
+    --model llada_dist \
+    --batch_size 1 \
+    --model_args 'model_path=./final_model,load_lora=False,cfg=0.0,is_check_greedy=False,mc_num=128,gen_length=256,steps=256,block_length=16,temperature=0.0'
 ```
-
-This quick reference provides the essential commands and configurations for training LLada-Reasoning models efficiently.
