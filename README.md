@@ -61,11 +61,36 @@ python rlhf/train_grpo.py --output_dir ./grpo_checkpoints
 # Merge LoRA adapters
 python merge_model.py --base_model ./base_model --adapter_path ./checkpoints/adapter
 
-# Generate text (edit prompts in generation.py)
-python generation.py --model_path ./merged_model
+# Generate text (edit prompts and model paths in generation.py)
+python generation.py
 
 # Evaluate
-python eval_llada.py --model_path ./merged_model
+
+# Make sure to add --confirm_run_unsafe_code if the benchmarks task is flagged as unsafe
+
+# Model with no adaptater
+accelerate launch \
+  --multi_gpu \
+  --num_processes 4 \
+  --mixed_precision bf16 \
+  eval_llada.py \
+    --tasks [TASK_NAME (eg. gsm8k)] \
+    --num_fewshot [number allowed by the benchmark (eg. 5)] \
+    --model llada_dist \
+    --batch_size 1 \
+    --model_args 'model_path=/path/to/model,load_lora=False,cfg=0.0,is_check_greedy=False,mc_num=128,gen_length=256,steps=256,block_length=16,temperature=0.0'
+
+# Model with adapater
+accelerate launch \
+  --multi_gpu \
+  --num_processes 4 \
+  --mixed_precision bf16 \
+  eval_llada.py \
+    --tasks [TASK_NAME (eg. gsm8k)] \
+    --num_fewshot [number allowed by the benchmark (eg. 5)] \
+    --model llada_dist \
+    --batch_size 1 \
+    --model_args 'model_path=/path/to/model,adapter_path=/path/to/adaptater,load_lora=True,cfg=0.0,is_check_greedy=False,mc_num=128,gen_length=1024,steps=1024,block_length=16,temperature=0.0' 
 ```
 
 ## Key Features
