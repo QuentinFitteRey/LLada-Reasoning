@@ -1,33 +1,67 @@
-#!/bin/bash
-#SBATCH -J llada_sft_run
-#SBATCH -o /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/sft_newdataset1/logs/sft_run3.out
-#SBATCH -e /home/hice1/qfitterey3/scratch/LLada-Reasoning/checkpoints/sft_newdataset1/logs/sft_run3.err
-#SBATCH -N 1
-#SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:H200:4
-#SBATCH -t 4:00:00                # Increased time limit for a 3-epoch run
-#SBATCH --mem=256G
-#SBATCH --cpus-per-task=8
-#SBATCH --tmp=1000G
+#!/usr/bin/env bash
+# Portable SFT (variant 3) training launcher
+# Focus: higher LR, smaller global batch.
 
-# --- Environment Setup ---
-module load anaconda3
-conda activate ~/scratch/envs/llada
-cd /home/hice1/qfitterey3/scratch/LLada-Reasoning
-export PYTHONPATH=$(pwd)
-nvidia-smi
+set -euo pipefail
 
-# --- Training Launch Command ---
-srun torchrun --nproc_per_node=4 --master_port=29405 sft_training/sft_train_new_dataset.py \
-    --pretrained-model /home/hice1/qfitterey3/scratch/LLada-Reasoning/llada_local_1.5 \
-    --sft-data ./filtered_conversational_dataset/ \
-    --output-dir ./checkpoints/sft_newdataset1 \
-    --lr 1e-4 \
-    --epochs 3 \
-    --local-batch 8 \
-    --batch-size 64 \
+if command -v conda >/dev/null 2>&1 && [[ -d "$HOME/scratch/envs/llada" ]]; then
+    conda activate "$HOME/scratch/envs/llada" || true
+fi
+
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$PROJECT_DIR"
+export PYTHONPATH="$PROJECT_DIR"
+
+: "${SFT_MODEL:=modelling_final}"
+: "${SFT_DATA:=./filtered_conversational_dataset}"
+: "${SFT_OUTPUT:=checkpoints/sft_newdataset1}"
+: "${SFT_EPOCHS:=3}"
+: "${SFT_LR:=1e-4}"
+: "${SFT_LOCAL_BATCH:=8}"
+: "${SFT_GLOBAL_BATCH:=64}"
+: "${SFT_LORA_TARGETS:=q_proj v_proj k_proj attn_out}"
+: "${SFT_LORA_WEIGHTS:=}"
+
+mkdir -p "$SFT_OUTPUT/logs"
+
+if [[ -z "${NUM_GPUS:-}" ]]; then
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        NUM_GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)
+    else
+        NUM_GPUS=1
+    fi
+fi
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi || true
+fi
+
+if ! command -v torchrun >/dev/null 2>&1; then
+    echo "[ERR] torchrun not found." >&2
+    exit 1
+fi
+
+CMD=(torchrun --nproc_per_node="$NUM_GPUS" --master_port=29407 sft_training/sft_train_new_dataset.py \
+    --pretrained-model "$SFT_MODEL" \
+    --sft-data "$SFT_DATA" \
+    --output-dir "$SFT_OUTPUT" \
+    --lr "$SFT_LR" \
+    --epochs "$SFT_EPOCHS" \
+    --local-batch "$SFT_LOCAL_BATCH" \
+    --batch-size "$SFT_GLOBAL_BATCH" \
     --warmup-ratio 0.1 \
-    --lora-target-modules q_proj v_proj k_proj attn_out \
-    --eps 1e-3 \
-    --sft-lora-weights ./checkpoints/sft_newdataset1/step-1000/sft_adapter \
+    --lora-target-modules $SFT_LORA_TARGETS \
+    --eps 1e-3 )
+
+if [[ -n "$SFT_LORA_WEIGHTS" ]]; then
+    CMD+=( --sft-lora-weights "$SFT_LORA_WEIGHTS" )
+fi
+
+echo "[SFT3] MODEL=$SFT_MODEL OUT=$SFT_OUTPUT GPUS=$NUM_GPUS LR=$SFT_LR" >&2
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    printf '[DRY_RUN] '; printf '%q ' "${CMD[@]}"; echo
+    exit 0
+fi
+
+"${CMD[@]}"
     --resume-from-checkpoint ./checkpoints/sft_newdataset1/step-1000/
