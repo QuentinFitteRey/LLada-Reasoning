@@ -128,6 +128,26 @@ This project is a consolidated, end‑to‑end pipeline for turning a base LLM i
 
 Rather than shipping many divergent experimental copies, only the final, canonical modeling implementation lives in `modelling_final/`. Weight directories, intermediate checkpoints, WIP or legacy model copies are purposely ignored to keep the public repository small and license‑safe.
 
+## Enhancements vs. Upstream / Classic LLaDA
+
+This fork / thesis codebase extends a more classic LLaDA-style baseline with the following concrete additions or changes:
+
+Category | Enhancement | Why It Matters
+-------- | ----------- | --------------
+Extended Context | Rotary / positional adaptation + memory‑aware attention settings | Stable 8K context without severe perplexity drift
+KV Cache Handling | Dual cache pathway (standard + speculative/aux) | Enables reasoning passes / multi-trajectory generation without recomputation
+Generation Control | Block length iterative sampling + multi‑candidate (`mc_num`) loop | Structured exploration for reasoning chains
+LoRA Strategy | Curated projection + (optional) FFN target set variants | Maintain quality while reducing trainable params
+Pretraining Masking | Custom extended-context masking curriculum | Teaches model to utilize long windows earlier
+SFT Pipeline | Dataset interleaving + chat template special tokens (`<think>` style) | Aligns supervised data with reasoning token boundaries
+DPO Implementation | Integrated lightweight preference trainer | Direct alignment without PPO complexity
+GRPO Variant | Reward‑guided rollouts with optional external judge (Ollama) | Flexible RLHF alternative for reasoning/diffusion style tasks
+Evaluation Harness | Few‑shot + constrained decoding knobs in one interface | Rapid iteration on reasoning benchmarks (e.g., GSM8K)
+Merge Utilities | Safe base + adapter merge script with minimal memory | Straightforward deployment artifact creation
+Portable Scripts | Environment-driven shell launchers (no SLURM hard ties) | Reproducible on personal machines or clusters
+
+If you previously used an upstream / vanilla repository: these enhancements reduce friction when experimenting with longer context reasoning, RLHF variants, and multi‑candidate generation strategies.
+
 ## Architecture & Modifications
 
 Key architectural / implementation choices embedded in `modelling_final/`:
