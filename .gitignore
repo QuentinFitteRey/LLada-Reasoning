@@ -222,7 +222,6 @@ llada_local_1.5/
 llada_local_15/
 llada_local_instruct/
 llada_local_trained/
-modelling_final/
 
 # Auth files
 .netrc
