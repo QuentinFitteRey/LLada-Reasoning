@@ -197,7 +197,8 @@ cython_debug/
 */data/*
 *.arrow
 *.parquet
-sft_training/stf_data/
+# (typo fixed: stf_data -> sft_data)
+sft_training/sft_data/
 sft_training/sft_data_small_debug/
 
 *.safetensors
@@ -221,6 +222,7 @@ llada_local/
 llada_local_1.5/
 llada_local_15/
 llada_local_instruct/
+# Local working model dirs (excluded). Public modeling code lives in modelling_final/ which is tracked.
 llada_local_trained/
 
 # Auth files
