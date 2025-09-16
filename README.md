@@ -140,37 +140,13 @@ Generation Control | Block length iterative sampling + multi‑candidate (`mc_nu
 LoRA Strategy | Curated projection + (optional) FFN target set variants | Maintain quality while reducing trainable params
 Pretraining Masking | Custom extended-context masking curriculum | Teaches model to utilize long windows earlier
 SFT Pipeline | Dataset interleaving + chat template special tokens (`<think>` style) | Aligns supervised data with reasoning token boundaries
-DPO Implementation | Integrated lightweight preference trainer | Direct alignment without PPO complexity
+DPO Implementation | Integrated lightweight preference trainer | Direct alignment for diffusion LLMs
 GRPO Variant | Reward‑guided rollouts with optional external judge (Ollama) | Flexible RLHF alternative for reasoning/diffusion style tasks
 Evaluation Harness | Few‑shot + constrained decoding knobs in one interface | Rapid iteration on reasoning benchmarks (e.g., GSM8K)
 Merge Utilities | Safe base + adapter merge script with minimal memory | Straightforward deployment artifact creation
 Portable Scripts | Environment-driven shell launchers (no SLURM hard ties) | Reproducible on personal machines or clusters
 
 If you previously used an upstream / vanilla repository: these enhancements reduce friction when experimenting with longer context reasoning, RLHF variants, and multi‑candidate generation strategies.
-
-## Architecture & Modifications
-
-Key architectural / implementation choices embedded in `modelling_final/`:
-
-- Extended context (8K) support with memory‑aware rotary / positional handling.
-- KV cache & dual‑cache style generation utilities for speculative / controlled reasoning steps.
-- LoRA integration points (projection layers + optional FFN blocks) for efficient adaptation.
-- Config surface aligned with Hugging Face `AutoConfig` / `AutoModel` registration (`model_type = "llada"`).
-- Modular block definitions enabling partial gradient checkpointing strategies.
-
-## Training Workflow (High Level)
-
-Stage | Script / Entry | Goal | Typical Output
------ | --------------- | ---- | -------------
-Pretraining | `pretraining/pretrain_llada_extended.py` | Adapt base to extended context + masking curriculum | `checkpoints/pretrain_run/`
-SFT | `sft_training/sft_train_new_dataset.py` | Supervised chat / reasoning instruction tuning | `checkpoints/sft_*` (LoRA adapters)
-RLHF (DPO) | `rlhf/train_dpo.py` | Preference alignment | `dpo_checkpoints/`
-RLHF (GRPO) | `rlhf/train_grpo.py` | Reinforcement style reward optimization | `grpo_checkpoints/`
-Merge | `merge_model.py` | Fuse base + adapter weights | `merged_model/`
-Evaluation | `eval_llada.py` | Few‑shot reasoning benchmarks | JSON / stdout metrics
-Generation | `generation.py` | Interactive / scripted generation | Text outputs
-
-Portable launch scripts in `script/` replace scheduler‑specific `.sbatch` directives with environment‑driven shell launchers (auto GPU count, dry‑run, etc.).
 
 ## Reasoning & Evaluation Flow
 
@@ -198,8 +174,6 @@ Path | Purpose
 `eval_llada.py` | Evaluation harness (experimental / evolving)
 `merge_model.py` | Merge base model + LoRA adapters
 `download.py` | Helper to fetch base / variant weights (user supplies / chooses source)
-
-Ignored runtime artifacts: checkpoints/, wandb runs, large datasets, downloaded weight directories (e.g. `llada_local*`, merged weight folders).
 
 ## Minimal vs Full Installation
 
