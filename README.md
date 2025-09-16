@@ -116,18 +116,70 @@ Training automatically logs to Weights & Biases:
 wandb login  # One-time setup
 ```
 
-## Directory Overview
+## What This Repository Provides
 
-| Path | Tracked | Purpose |
-|------|---------|---------|
-| modelling_final/ | yes | Final model config + modeling code to copy into weight dirs |
-| pretraining/ | yes | Extended-context masking pretraining script |
-| sft_training/ | yes | Supervised fine-tuning (chat style) |
-| rlhf/ | yes | DPO / GRPO training components |
-| generation.py | yes | Dual-cache generation utilities |
-| eval_llada.py | yes | Evaluation harness (experimental) |
-| checkpoints/, wandb/, filtered_conversational_dataset/ | ignored | Local artifacts & data |
-| llada_local*, merged_model/ | ignored | Downloaded or merged model weights |
+This project is a consolidated, end‑to‑end pipeline for turning a base LLM into a reasoning‑enhanced model. It covers every stage:
+
+1. Data + Extended Context Pretraining (masked / extended window adaptation)
+2. Supervised Fine‑Tuning (instruction & dialogue formatting)
+3. RLHF Variants (Direct Preference Optimization and GRPO style reinforcement)
+4. Efficient Parameter Adaptation (LoRA targets chosen for minimal quality loss)
+5. Generation & Evaluation (deterministic + stochastic reasoning paths, few‑shot harness)
+
+Rather than shipping many divergent experimental copies, only the final, canonical modeling implementation lives in `modelling_final/`. Weight directories, intermediate checkpoints, WIP or legacy model copies are purposely ignored to keep the public repository small and license‑safe.
+
+## Architecture & Modifications
+
+Key architectural / implementation choices embedded in `modelling_final/`:
+
+- Extended context (8K) support with memory‑aware rotary / positional handling.
+- KV cache & dual‑cache style generation utilities for speculative / controlled reasoning steps.
+- LoRA integration points (projection layers + optional FFN blocks) for efficient adaptation.
+- Config surface aligned with Hugging Face `AutoConfig` / `AutoModel` registration (`model_type = "llada"`).
+- Modular block definitions enabling partial gradient checkpointing strategies.
+
+## Training Workflow (High Level)
+
+Stage | Script / Entry | Goal | Typical Output
+----- | --------------- | ---- | -------------
+Pretraining | `pretraining/pretrain_llada_extended.py` | Adapt base to extended context + masking curriculum | `checkpoints/pretrain_run/`
+SFT | `sft_training/sft_train_new_dataset.py` | Supervised chat / reasoning instruction tuning | `checkpoints/sft_*` (LoRA adapters)
+RLHF (DPO) | `rlhf/train_dpo.py` | Preference alignment | `dpo_checkpoints/`
+RLHF (GRPO) | `rlhf/train_grpo.py` | Reinforcement style reward optimization | `grpo_checkpoints/`
+Merge | `merge_model.py` | Fuse base + adapter weights | `merged_model/`
+Evaluation | `eval_llada.py` | Few‑shot reasoning benchmarks | JSON / stdout metrics
+Generation | `generation.py` | Interactive / scripted generation | Text outputs
+
+Portable launch scripts in `script/` replace scheduler‑specific `.sbatch` directives with environment‑driven shell launchers (auto GPU count, dry‑run, etc.).
+
+## Reasoning & Evaluation Flow
+
+The evaluation harness supports:
+
+- Few‑shot prompting (e.g. GSM8K) with configurable shots.
+- Greedy or masked constrained decoding modes.
+- Multi‑candidate generation parameters (`mc_num`, `temperature`, block sampling length) passed via `--model_args`.
+
+Typical call (portable script):
+```bash
+TASKS=gsm8k FEWSHOT=5 MODEL_PATH=modelling_final DRY_RUN=1 bash script/evaluate.sbatch
+```
+
+## Repository Layout (Concise)
+
+Path | Purpose
+---- | -------
+`modelling_final/` | Final, canonical model config + modeling code (only tracked architecture source)
+`pretraining/` | Extended context pretraining logic
+`sft_training/` | SFT dataset prep + training
+`rlhf/` | DPO / GRPO trainers & datasets
+`script/` | Portable launch scripts (pretrain, SFT, RLHF, eval, generation)
+`generation.py` | Generation utilities
+`eval_llada.py` | Evaluation harness (experimental / evolving)
+`merge_model.py` | Merge base model + LoRA adapters
+`download.py` | Helper to fetch base / variant weights (user supplies / chooses source)
+
+Ignored runtime artifacts: checkpoints/, wandb runs, large datasets, downloaded weight directories (e.g. `llada_local*`, merged weight folders).
 
 ## Minimal vs Full Installation
 
