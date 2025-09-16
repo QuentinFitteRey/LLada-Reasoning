@@ -4,23 +4,26 @@ A comprehensive training framework for large language diffusion models with reas
 
 ## Quick Start
 
-### 1. Setup
+### 1. Environment Setup
 ```bash
 git clone https://github.com/QuentinFitteRey/LLada-Reasoning
 cd LLada-Reasoning/
 conda create -n llada python=3.11 -y
 conda activate llada
-pip install -r requirements.txt
-```
+pip install -r requirements.txt  # full stack (heavy)
 
+# (Optional) Minimal core install (create later):
+# pip install -r requirements-core.txt
+```
 ### 2. Download Base Model
 ```bash
 # Download the base model weights
 # Edit download.py to choose between base model or 1.5 version
 python download.py
 
-# Copy modeling files for advanced features (YARN, KC cache, etc.)
-# Copy all files from modelling_final/ to your model weights directory
+# The repository ships only one tracked modeling implementation: modelling_final/
+# These files already represent the final architecture (YARN, KV cache optimizations, etc.)
+# If you overwrite a downloaded model directory with them:
 cp modelling_final/* /path/to/your/model/weights/directory/
 
 # Note: Adapter compatibility depends on which base model you use:
@@ -28,7 +31,7 @@ cp modelling_final/* /path/to/your/model/weights/directory/
 # - Adapters trained on 1.5 model work with ./llada_local_1.5
 ```
 
-### 4. Train Your Model
+### 3. Train Your Model
 
 #### Pretraining (Extended Context)
 ```bash
@@ -54,7 +57,7 @@ bash script/judge_ollama.sh   # Terminal 2
 python rlhf/train_grpo.py --output_dir ./grpo_checkpoints
 ```
 
-### 5. Use Your Model
+### 4. Use Your Model
 
 #### Merge and Generate
 ```bash
@@ -111,4 +114,40 @@ accelerate launch \
 Training automatically logs to Weights & Biases:
 ```bash
 wandb login  # One-time setup
+```
+
+## Directory Overview
+
+| Path | Tracked | Purpose |
+|------|---------|---------|
+| modelling_final/ | yes | Final model config + modeling code to copy into weight dirs |
+| pretraining/ | yes | Extended-context masking pretraining script |
+| sft_training/ | yes | Supervised fine-tuning (chat style) |
+| rlhf/ | yes | DPO / GRPO training components |
+| generation.py | yes | Dual-cache generation utilities |
+| eval_llada.py | yes | Evaluation harness (experimental) |
+| checkpoints/, wandb/, filtered_conversational_dataset/ | ignored | Local artifacts & data |
+| llada_local*, merged_model/ | ignored | Downloaded or merged model weights |
+
+## Minimal vs Full Installation
+
+If you only need inference + basic fine-tuning (LoRA): create (optional) a requirements-core.txt with roughly:
+```
+torch
+transformers
+accelerate
+datasets
+peft
+bitsandbytes
+wandb
+lm_eval
+safetensors
+einops
+```
+The full `requirements.txt` adds: RLHF tooling (openrlhf, deepspeed), serving (vllm, fastapi), optimization (triton, xformers), experimentation (ray), geometry / vision (opencv, trimesh, cadquery), etc.
+
+## Notes
+
+- Evaluation harness still evolving; parameter names may change.
+- Ensure you run download.py before training so model files exist at ./llada_local (or adjust paths).
 ```

@@ -1,0 +1,13 @@
+# Core minimal dependencies for basic model load, LoRA finetune, generation and evaluation.
+# Install with: pip install -r requirements-core.txt
+
+torch
+transformers
+accelerate
+datasets
+peft
+bitsandbytes
+wandb
+lm_eval
+safetensors
+einops

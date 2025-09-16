@@ -37,13 +37,10 @@ def set_seed(seed):
 @register_model("llada_dist")
 class LLaDAEvalHarness(LM):
     def __init__(
-        self,
-        model_path: str = "./llada_local",
-        adapter_path: str | None = None,
-        load_lora: bool = False,
-        model_path: str = "./llada_local",
-        adapter_path: str | None = None,
-        load_lora: bool = False,
+    self,
+    model_path: str = "./llada_local",
+    adapter_path: str | None = None,
+    load_lora: bool = False,
         mask_id=126336,
         max_length=8192,
         batch_size=32,
