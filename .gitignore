@@ -200,6 +200,8 @@ cython_debug/
 sft_training/stf_data/
 sft_training/sft_data_small_debug/
 
+*.safetensors
+
 checkpoints/
 wandb/
 data_pretrain/
@@ -215,4 +217,12 @@ validation/
 filtered_conversational_dataset/
 filtered_conversational_dataset_4k/
 
-*.safetensors
+llada_local/
+llada_local_1.5/
+llada_local_15/
+llada_local_instruct/
+llada_local_trained/
+modelling_final/
+
+# Auth files
+.netrc

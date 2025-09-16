@@ -6,7 +6,8 @@ from openai.types.chat.chat_completion import Choice
 import os
 import math
 # os.environ["OPENAI_API_BASE"] = "http://localhost:11434/v1"
-os.environ["OPENAI_API_KEY"] = "ollama"  # required dummy
+if "OPENAI_API_KEY" not in os.environ:
+    os.environ["OPENAI_API_KEY"] = "ollama"  # required dummy for Ollama
 
 def scalling(scores):
     s_min, s_max = min(scores) + 1e-6, max(scores)
