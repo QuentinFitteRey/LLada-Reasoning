@@ -475,7 +475,8 @@ class ActivationCheckpointingStrategy(StrEnum):
 
 class LLaDAConfig(PretrainedConfig):
     model_type = "llada"
-    keys_to_ignore_at_inference = ["past_key_values"]  # TODO: confirm
+    # Ignoring past_key_values during standard pipeline serialization avoids unnecessary outputs.
+    keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(self, use_cache: bool = False, **kwargs):
         model_config = ModelConfig()
