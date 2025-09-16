@@ -142,9 +142,6 @@ Pretraining Masking | Custom extended-context masking curriculum | Teaches model
 SFT Pipeline | Dataset interleaving + chat template special tokens (`<think>` style) | Aligns supervised data with reasoning token boundaries
 DPO Implementation | Integrated lightweight preference trainer | Direct alignment for diffusion LLMs
 GRPO Variant | Reward‑guided rollouts with optional external judge (Ollama) | Flexible RLHF alternative for reasoning/diffusion style tasks
-Evaluation Harness | Few‑shot + constrained decoding knobs in one interface | Rapid iteration on reasoning benchmarks (e.g., GSM8K)
-Merge Utilities | Safe base + adapter merge script with minimal memory | Straightforward deployment artifact creation
-Portable Scripts | Environment-driven shell launchers (no SLURM hard ties) | Reproducible on personal machines or clusters
 
 If you previously used an upstream / vanilla repository: these enhancements reduce friction when experimenting with longer context reasoning, RLHF variants, and multi‑candidate generation strategies.
 
